@@ -1,0 +1,280 @@
+// DIRECTOR.LTD data layer.
+//
+// Dev/local runs against SQLite (zero external setup). Swap the datasource
+// to postgresql + DATABASE_URL when the real Companies House pipeline and
+// production infrastructure are ready — the schema itself is portable.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// SQLite has no native enum support in Prisma, so role/status/type are
+// plain strings constrained by the TS union types in src/lib/types.ts.
+// Swapping the datasource to Postgres later can promote these to real
+// Prisma enums without changing application code.
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String
+  role         String    @default("USER")
+  active       Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  lastLoginAt  DateTime?
+
+  reports             Report[]
+  companyStates       UserCompanyState[]
+  activity            ActivityLog[]
+  followUps           FollowUp[]
+  calendarConnections CalendarConnection[]
+}
+
+model Company {
+  id            String   @id @default(cuid())
+  companyNumber String   @unique
+  name          String
+  status        String
+  type          String
+  incorporationDate DateTime
+  dissolutionDate   DateTime?
+  dormant           Boolean   @default(false)
+  sicCodes          String    @default("")
+
+  registeredAddress1 String
+  registeredAddress2 String?
+  registeredCity     String
+  registeredPostcode String
+  registeredCounty   String?
+
+  accountsNextDue     DateTime?
+  accountsLastMadeUp  DateTime?
+  accountsOverdue     Boolean   @default(false)
+  confirmationNextDue DateTime?
+  confirmationOverdue Boolean   @default(false)
+
+  hasDS01        Boolean @default(false)
+  directorCount  Int     @default(0)
+  singleDirector Boolean @default(false)
+
+  // Real Companies House integration metadata. "statusDetail" carries the
+  // granular company_status_detail value (e.g. active-proposal-to-strike-off)
+  // that only the full REST profile exposes. "accountType" is the raw
+  // accounts.last_accounts.type value dormant is derived from. "source"
+  // tracks provenance (seed | bulk_import | stream | rest_enrichment) so
+  // synthetic dev rows are never confused with real ingested data.
+  statusDetail       String?
+  accountType        String?
+  source             String    @default("seed")
+  chLastFetchedAt    DateTime?
+  officersCoverage   String    @default("none") // none | partial | full
+  officersFetchedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  directors    Director[]
+  userStates   UserCompanyState[]
+  filingEvents FilingEvent[]
+
+  @@index([status])
+  @@index([type])
+  @@index([dormant])
+  @@index([registeredPostcode])
+  @@index([incorporationDate])
+  @@index([accountsOverdue])
+  @@index([confirmationOverdue])
+  @@index([hasDS01])
+  @@index([singleDirector])
+  @@index([directorCount])
+  @@index([name])
+  @@index([source])
+  @@index([officersCoverage])
+}
+
+model Director {
+  id          String    @id @default(cuid())
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name        String
+  role        String    @default("director")
+  appointedOn DateTime?
+  resignedOn  DateTime?
+  nationality String?
+  occupation  String?
+  email       String?
+  phone       String?
+  manuallyAdded Boolean @default(false)
+
+  // officerId is Companies House's own appointment id, used as the stable
+  // upsert key for real officer rows (never set for manuallyAdded contacts).
+  officerId String?
+  source    String  @default("seed") // seed | rest | stream
+
+  createdAt   DateTime @default(now())
+
+  @@index([companyId])
+  @@index([officerId])
+}
+
+// One raw event from the Companies House filing stream. transactionId is
+// unique so re-processing the same stream position (restart, overlap) never
+// creates duplicates. This is the audit trail behind hasDS01 and the source
+// of truth the daily update / backfill jobs read from.
+model FilingEvent {
+  id            String   @id @default(cuid())
+  companyId     String?
+  company       Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  companyNumber String
+  transactionId String   @unique
+  type          String
+  date          String?
+  description   String?
+  resourceUri   String?
+  processedAt   DateTime @default(now())
+
+  @@index([companyNumber])
+  @@index([type])
+}
+
+// One run of a bulk ingest / stream backfill / officer backfill / daily
+// update job. Gives Settings and Super Admin real "last successful run" /
+// "last failure" data instead of a hardcoded claim, and "checkpoint" lets an
+// interrupted bulk ingest resume instead of restarting from scratch.
+model IngestionRun {
+  id           String    @id @default(cuid())
+  kind         String // bulk_csv | stream_backfill | officer_backfill | daily_update
+  status       String    @default("running") // running | success | failed | partial
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  rowsProcessed Int      @default(0)
+  rowsFailed    Int      @default(0)
+  checkpoint    String?
+  errorMessage  String?
+
+  @@index([kind, startedAt])
+  @@index([status])
+}
+
+model UserCompanyState {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  followed  Boolean  @default(false)
+  trashed   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  notes     Note[]
+  followUps FollowUp[]
+
+  @@unique([userId, companyId])
+  @@index([userId, followed])
+  @@index([userId, trashed])
+}
+
+model Note {
+  id                 String           @id @default(cuid())
+  userCompanyStateId String
+  userCompanyState   UserCompanyState @relation(fields: [userCompanyStateId], references: [id], onDelete: Cascade)
+  body               String
+  authorName         String
+  createdAt          DateTime         @default(now())
+
+  @@index([userCompanyStateId])
+}
+
+model FollowUp {
+  id                 String           @id @default(cuid())
+  userCompanyStateId String
+  userCompanyState   UserCompanyState @relation(fields: [userCompanyStateId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User             @relation(fields: [userId], references: [id])
+  dueDate            DateTime
+  note               String?
+  done               Boolean          @default(false)
+  createdAt          DateTime         @default(now())
+
+  calendarEvent CalendarEvent?
+
+  @@index([userCompanyStateId])
+  @@index([userId, dueDate])
+}
+
+model CalendarConnection {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider  String // GOOGLE | MICROSOFT | INTERNAL
+  status    String   @default("DISCONNECTED") // CONNECTED | DISCONNECTED | ERROR
+  accountEmail String?
+  calendarId   String?
+
+  // Encrypted (AES-256-GCM) with TOKEN_ENCRYPTION_KEY — never plaintext,
+  // never sent to the client.
+  accessTokenEnc  String?
+  refreshTokenEnc String?
+  tokenExpiresAt  DateTime?
+
+  lastSyncAt    DateTime?
+  lastSyncError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, provider])
+  @@index([userId])
+}
+
+// Links a FollowUp to the external calendar event created for it, so it can
+// be updated/deleted later. One row per follow-up (its currently active
+// provider's event) — reconnecting to a different provider replaces it.
+model CalendarEvent {
+  id              String   @id @default(cuid())
+  followUpId      String   @unique
+  followUp        FollowUp @relation(fields: [followUpId], references: [id], onDelete: Cascade)
+  provider        String
+  externalEventId String
+  lastSyncedAt    DateTime @default(now())
+  syncStatus      String   @default("synced") // synced | error
+
+  @@index([provider])
+}
+
+model Report {
+  id           String    @id @default(cuid())
+  ownerId      String
+  owner        User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name         String
+  description  String?
+  filterJson   String
+  columnsJson  String?
+  sortJson     String?
+  dailyRefresh Boolean   @default(true)
+  lastRunAt    DateTime?
+  lastRefreshError String?
+  resultCount  Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([ownerId])
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    String
+  meta      String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([action])
+}
