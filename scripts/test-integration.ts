@@ -58,7 +58,7 @@ async function main() {
     if (mig.status !== 0) throw new Error("migrate deploy failed");
 
     const authSecret = randomBytes(48).toString("base64url");
-    const common = { AUTH_SECRET: authSecret, TOKEN_ENCRYPTION_KEY: randomBytes(32).toString("hex") };
+    const common = { AUTH_SECRET: authSecret, TOKEN_ENCRYPTION_KEY: randomBytes(32).toString("hex"), TRUST_PROXY: "1" };
     servers.push(startServer(3211, { ...common, SEED_DATA_VISIBLE: "true", EXPORT_MAX_ROWS_USER: "50", EXPORT_MAX_ROWS_ADMIN: "500" }));
     servers.push(startServer(3212, { ...common, SEED_DATA_VISIBLE: "false" }));
     await Promise.all([waitForHttp("http://127.0.0.1:3211/login"), waitForHttp("http://127.0.0.1:3212/login")]);

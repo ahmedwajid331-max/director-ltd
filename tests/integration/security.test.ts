@@ -115,6 +115,17 @@ test("login is throttled per account after repeated failures, with a generic mes
   assert.equal(elsewhere.status, 200);
 });
 
+test("rotating the source IP (spoofed X-Forwarded-For) does NOT bypass the per-account limit", async () => {
+  const user = await createUser("USER", "rot");
+  let firstBlocked = -1;
+  for (let i = 0; i < 40; i++) {
+    const r = await login(user.email, "wrong-password-rotating"); // helper sends a different X-Forwarded-For every call
+    if (r.status === 429 && firstBlocked < 0) firstBlocked = i;
+  }
+  assert.ok(firstBlocked > 0 && firstBlocked <= 31, `blocked after ${firstBlocked} attempts`);
+  assert.equal((await login(user.email, STRONG_PASSWORD)).status, 429); // even the right password, from yet another IP
+});
+
 test("unknown email and wrong password give the identical response", async () => {
   const user = await createUser("USER", "enum");
   const wrongPw = await login(user.email, "definitely-wrong-1");
@@ -208,4 +219,34 @@ test("an invalid filter on export is a controlled 400", async () => {
   const user = await sessionFor("USER");
   const r = await api(user, "/api/companies/export", { body: { filter: group("AND", rule("passwordHash", "equals", "x")) } });
   assert.equal(r.status, 400);
+});
+
+// ---- Health + status pages ------------------------------------------------------------------
+test("/api/health: public gets a minimal status, Super Admin gets job detail", async () => {
+  const pub = await api(null, "/api/health");
+  assert.equal(pub.status, 200);
+  assert.ok(["ok", "degraded"].includes(pub.json.status));
+  assert.equal(pub.json.jobs, undefined);
+  const user = await sessionFor("USER");
+  assert.equal((await api(user, "/api/health")).json.jobs, undefined);
+  const sa = await sessionFor("SUPER_ADMIN");
+  const detail = await api(sa, "/api/health");
+  assert.ok(detail.json.jobs && "stalledJobs" in detail.json.jobs);
+});
+
+test("Settings and Super Admin pages show a dead job as stalled, not running, and real coverage", async () => {
+  const old = new Date(Date.now() - 60 * 60 * 1000);
+  await db.ingestionRun.create({ data: { kind: "stream", status: "running", heartbeatAt: old } }); // newest stream run, but its heartbeat is an hour old
+  const sa = await sessionFor("SUPER_ADMIN");
+  for (const path of ["/settings", "/admin"]) {
+    const res = await fetch(`${BASE}${path}`, { headers: { cookie: `director_session=${sa.cookie}` } });
+    assert.equal(res.status, 200, path);
+    const html = await res.text();
+    assert.match(html, /stalled/, `${path} shows the dead stream job as stalled`);
+    assert.match(html, /Filing stream/);
+  }
+  const settings = await (await fetch(`${BASE}/settings`, { headers: { cookie: `director_session=${sa.cookie}` } })).text();
+  assert.match(settings, /Real data coverage/);
+  assert.match(settings, /of roughly 5\.6 million/);
+  await db.ingestionRun.deleteMany({ where: { kind: "stream", status: "running", heartbeatAt: { lt: new Date(Date.now() - 30 * 60 * 1000) } } });
 });

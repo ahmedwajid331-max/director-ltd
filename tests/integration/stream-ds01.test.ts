@@ -78,6 +78,10 @@ before(async () => {
     if (number === "SV000001" && restHits[p] === 1) return send(503, {});
     if (number === "AUTH0001") return send(401, {});
     if (number === "NOTFOUND") return send(404, {});
+    if (officers && number === "OFFBAD01") {
+      // second officer has no name -> the database rejects it
+      return send(200, { items: [{ name: "GOOD ONE", officer_role: "director", links: { officer: { appointments: "/officers/G1/appointments" } } }, { officer_role: "director" }], total_results: 2 });
+    }
     if (officers) {
       const start = Number(url.searchParams.get("start_index") ?? 0);
       const per = Number(url.searchParams.get("items_per_page") ?? 35);
@@ -303,4 +307,15 @@ test("officer sync stores ALL officers, sets the director count, and leaves CRM 
   // Re-sync is idempotent (replace, not append).
   await syncCompanyDirectors(c.id, "OFF00250");
   assert.equal(await db.director.count({ where: { companyId: c.id } }), 250);
+});
+
+test("officer sync is atomic: a failure part-way leaves the previous officers intact (transaction rollback)", async () => {
+  const { syncCompanyDirectors } = await import("../../src/lib/companies-house/sync");
+  const c = await makeCompany({ companyNumber: "OFFBAD01", directorCount: 3, singleDirector: false });
+  await db.director.createMany({ data: ["A", "B", "C"].map((n) => ({ companyId: c.id, name: `KEEP ${n}`, role: "director", source: "rest" })) });
+  await assert.rejects(syncCompanyDirectors(c.id, "OFFBAD01"));
+  assert.equal(await db.director.count({ where: { companyId: c.id } }), 3, "old directors still there");
+  const after = await db.company.findUniqueOrThrow({ where: { id: c.id } });
+  assert.equal(after.directorCount, 3);
+  assert.equal(after.officersCoverage, "none");
 });

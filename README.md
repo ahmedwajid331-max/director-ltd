@@ -2,88 +2,106 @@
 
 Companies House search, filtering, reporting and CRM platform.
 
-## Stack
+**Stack:** Next.js 16 (App Router) · TypeScript · Tailwind v4 · Prisma · **PostgreSQL** · custom session auth · real Companies House REST + streaming APIs · Google Calendar OAuth.
 
-Next.js 16 (App Router) · TypeScript · Tailwind CSS v4 · Prisma · SQLite (dev) · custom JWT session auth · real Companies House REST + streaming APIs · Google Calendar OAuth.
-
-## Getting started
+## Getting started (development)
 
 ```bash
 npm install
-npm run db:push       # create the local SQLite database from prisma/schema.prisma
-npm run db:seed        # seed ~7,000 realistic development companies, directors, users and demo CRM data
-npm run dev
+npm run db:dev          # terminal 1: disposable local PostgreSQL on :5433 (no Docker needed), UTF-8
+cp .env.example .env    # then fill AUTH_SECRET (see the file for the generator command)
+npm run db:migrate      # apply migrations
+npm run db:seed         # OPTIONAL: ~7,000 synthetic development companies + three dev users
+npm run dev             # terminal 2
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+`db:seed` never prints or stores a known password: it generates random passwords for the three development
+users (Super Admin / Admin / User) and writes them to `./.dev-credentials.local` (gitignored). Set
+`SEED_PASSWORD` to choose one, or rotate any account later:
 
-### Demo accounts
+```bash
+NEW_PASSWORD='a long unique passphrase' npm run user:set-password -- someone@example.com
+npm run user:set-password -- someone@example.com --generate
+```
 
-Seeded by `prisma/seed.ts`, all using the password `DirectorAdmin123!`:
+The seed refuses to run when `NODE_ENV=production`. There are no demo credentials anywhere in the UI or docs.
 
-| Email | Role |
-|---|---|
-| `admin@director.ltd` | Super Admin |
-| `ops@director.ltd` | Admin |
-| `sales@director.ltd` | User |
+### Environment
+
+See [.env.example](.env.example) for every variable. Required: `DATABASE_URL`, `AUTH_SECRET`. Real data needs
+`COMPANIES_HOUSE_API_KEY` (REST) and `COMPANIES_HOUSE_STREAM_KEY` (filing stream). **Never commit or paste key values**;
+keep them in `.env` (gitignored) or AWS Secrets Manager. In production the app refuses to start with a missing/short/placeholder `AUTH_SECRET`.
 
 ## Architecture
 
-- `prisma/schema.prisma` — data model. `Company`/`Director` are real Companies House data (with a `source` field tracking provenance: `seed`/`bulk_import`/`stream`/`rest_enrichment`); `FilingEvent` is the raw filing-stream audit trail; `IngestionRun` records every pipeline run (success/failure/checkpoint); `UserCompanyState`/`Note`/`FollowUp`/`Report`/`ActivityLog` are user CRM data, kept entirely separate from CH source data; `CalendarConnection`/`CalendarEvent` back the calendar integration. Runs on SQLite locally — swap `datasource` to `postgresql` + `DATABASE_URL` for production (every column is plain-typed so this needs no schema changes; see the note in `compile.ts` about restoring case-insensitive string matching on Postgres).
-- `src/lib/filters/` — the filter/query-builder engine. `fields.ts` is the single registry of filterable Companies House attributes (using the *real* `company_status`/`company_type`/`account_type` enums — see comments there); `compile.ts` turns a saved AND/OR/nested filter tree into a Prisma `where` clause. Add a new filter by adding one entry to the registry.
-- `src/lib/companies-house/` — the real Companies House integration:
-  - `client.ts` — REST/streaming HTTP client (Basic Auth, rate-limit aware).
-  - `profile.ts` / `officers.ts` — map real API responses to our schema. `dormant` is derived strictly from `accounts.last_accounts.type`, never from `company_status`. `hasDS01` is derived from `company_status_detail === "active-proposal-to-strike-off"` or a streamed `DS01` filing event — the Advanced Search API's `company_status` filter only accepts the 12 real top-level status values (active, dissolved, liquidation, receivership, converted-closed, voluntary-arrangement, insolvency-proceedings, administration, open, closed, registered, removed); `active-proposal-to-strike-off` is a `company_status_detail` value only the full profile endpoint exposes.
-  - `sync.ts` — DB-touching sync functions used by lazy-fetch (company detail page), the stream worker, and the backfill queue.
-  - `bulkIngest.ts` — two ingestion paths: `bulkIngestFromSearch` (fast, real, uses the Advanced Search API — good for dev/testing a real slice) and `bulkIngestFromCsv` (production-scale: streams the official monthly "Free Company Data Product" CSV, ~5M rows, batched + resumable via `IngestionRun.checkpoint`).
-  - `streamWorker.ts` — long-lived consumer of the filing stream. Every event is deduped on `transactionId`; `DS01` events trigger an immediate profile refresh.
-  - `dailyUpdate.ts` — the real scheduled job: recomputes overdue flags, advances the rate-limited officer-backfill queue, refreshes every `dailyRefresh` report, and records an `IngestionRun`.
-- `src/lib/calendar/` — provider-agnostic calendar integration (`types.ts` defines the `CalendarProvider` interface every provider implements identically). `providers/internal.ts` is the always-on fallback; `providers/google.ts` is a real, working Google Calendar OAuth2 integration (encrypted token storage via `token-crypto.ts`, a dedicated "DIRECTOR.LTD Follow-ups" calendar per user). Adding Microsoft/Outlook means one new file implementing the same interface — no changes to the CRM/follow-up code.
-- `src/lib/auth/` — password hashing, signed JWT session cookies, role-based route guards (`USER` < `ADMIN` < `SUPER_ADMIN`), enforced server-side in both `src/proxy.ts` (page routes) and every API route individually.
-- `src/app/(app)/` — the authenticated app shell and pages. Settings and Super Admin show **real** pipeline/calendar health (data-source breakdown, last successful/failed run per job kind, officer-data coverage %) — not hardcoded claims.
-- `src/app/api/` — REST route handlers backing every mutation, plus `api/calendar/*` for the OAuth connect/callback/disconnect/status flow.
+- `prisma/schema.prisma` + `prisma/migrations` — PostgreSQL schema. `Company`/`Director` hold Companies House data
+  (`Company.source`: `seed` | `bulk_import` | `advanced_search` | `stream` | `rest_enrichment`). User/CRM data
+  (`UserCompanyState`, `Note`, `FollowUp`, `CrmContact`, `Report`, `ActivityLog`) is separate. Date-only facts are SQL `DATE`.
+  Hand-written performance objects (trigram GIN indexes for `ILIKE`, postcode prefix index, partial indexes for the
+  DS01/dormant/late-filing filters) live in the initial migration.
+- `src/lib/filters` — one registry of filterable fields (`fields.ts`), a **validator** (`validate.ts`: unknown fields,
+  disallowed operators, NaN, impossible dates, oversized/deep trees are rejected with HTTP 400) and a compiler to Prisma
+  (`compile.ts`). Every query goes through `buildCompanyWhere` (`src/lib/data/companies.ts`) so search, export, reports and
+  the daily refresh can never disagree.
+- `src/lib/companies-house` — the real integration: `client.ts` (auth, rate-limit awareness, 429/5xx retry), `csv/`
+  (ZIP streaming, real dotted headers, DD/MM/YYYY parser, explicit category maps), `bulkIngest.ts`, `filingEvents.ts`
+  (DS01/DS02), `streamWorker.ts`, `officers.ts`, `dailyUpdate.ts`.
+- `src/lib/jobs` — run bookkeeping: heartbeats, stale-run reconciliation, success/partial/failed classification.
+- `src/lib/calendar` — provider-agnostic calendar (internal fallback + Google; follow-ups are all-day events).
+- `src/lib/auth` — password policy, login throttling, sessions.
 
-### Director/officer data coverage
+## Security model
 
-Officer data isn't in the monthly bulk file at all — only per-company via REST or the officers stream. Coverage is intentionally partial and tracked explicitly (`Company.officersCoverage`: `none`/`partial`/`full`, visible in Settings): a company gets its directors fetched (and cached) the first time it's viewed or matched, the daily update job advances a rate-limited backfill queue (active companies first), and `dailyRefresh` reports never claim director-count accuracy beyond what's actually been fetched.
+- **Sessions** are signed cookies, but every request re-checks the user row: a deactivated/deleted user is rejected at once and
+  the role always comes from the database (a demotion applies on the next request).
+- **Roles:** `USER` < `ADMIN` < `SUPER_ADMIN`. An Admin can only activate/deactivate plain Users; only a Super Admin changes roles or
+  touches Admin/Super Admin accounts; nobody can deactivate/demote themselves. Enforced in the API, not the UI.
+- **Login throttling** (DB-backed, shared by all instances): 8 failures / 15 min per account+IP, 40 per IP; generic error text; constant-time comparison for unknown accounts.
+- **Passwords:** 12+ characters, no common/guessable passwords, must not contain the email name.
+- **Headers:** CSP, HSTS, X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy (`next.config.ts`). The CSP keeps `'unsafe-inline'` for scripts (Next.js hydration); move to nonces in `proxy.ts` if a stricter policy is required.
+- **Export:** a `USER` must apply a filter or search term (no "export everything"); row caps per role (`EXPORT_MAX_ROWS_*`); every export is written to the activity log; CSV cells starting with `= + - @` are neutralised.
+- Secrets live only in environment variables.
 
-## Environment variables
+## Data semantics (decisions worth knowing)
 
-| Variable | Required | Purpose |
-|---|---|---|
-| `DATABASE_URL` | always | SQLite file locally; Postgres connection string in production |
-| `AUTH_SECRET` | always | Signs session JWTs |
-| `COMPANIES_HOUSE_API_KEY` | for real data | CH REST API (company profile, officers, search) |
-| `COMPANIES_HOUSE_STREAM_KEY` | for real-time DS01 | CH filing stream |
-| `TOKEN_ENCRYPTION_KEY` | for calendar | Encrypts OAuth tokens at rest — generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
-| `GOOGLE_CALENDAR_CLIENT_ID` / `_CLIENT_SECRET` / `_REDIRECT_URI` | for Google Calendar | See manual setup below |
+- **Director count** (`directorCount`, "single director") counts *active* officers (no `resigned_on`) whose role is `director`, `corporate-director`, `nominee-director`, `corporate-nominee-director`, or — for LLPs — `llp-member`, `llp-designated-member`, `corporate-llp-member`, `corporate-llp-designated-member`. Secretaries, judicial factors and any other role are stored and shown but **not** counted. All officer pages are fetched (the API returns 35 per page by default). See `src/lib/companies-house/officers.ts`.
+- **Manual CRM contacts** are private to the user who typed them, stored separately (`CrmContact`), and **never** change `directorCount` / `singleDirector` or any Companies House director filter.
+- **DS01** = application to strike the company off. `hasDS01` is set when a DS01 filing event arrives on the stream (`ds01FiledAt`) or the register shows "Active – Proposal to Strike off". A DS02 (withdrawal) clears it. A monthly CSV re-import or profile refresh can never erase a DS01 recorded from an event.
+- **Company age** uses calendar dates (UTC): a company incorporated on 2016-09-30 is exactly 10 on 2026-09-30, at any time of day.
+- **Follow / Trash** are per user and mutually exclusive: trashing a followed company un-follows it; following a trashed company restores it.
+- **Dormant** comes from the last accounts type (`DORMANT`), never from company status.
+- **Seed vs real data:** every company carries its `source`. `SEED_DATA_VISIBLE` decides whether synthetic rows appear in search/reports/exports (default: visible in development, hidden in production). Dashboard, landing page and Settings state real coverage ("N of roughly 5.6 million").
 
-## Manual setup
+## Reports: print and share
 
-1. **Companies House credentials** — already configured server-side for this environment. If rotating (recommended if any key was ever committed or shared in plaintext): [Companies House Developer Hub](https://developer.company-information.service.gov.uk/) → your application → regenerate → update `COMPANIES_HOUSE_API_KEY`/`COMPANIES_HOUSE_STREAM_KEY` in `.env`. Free.
-2. **Google Calendar OAuth** (only needed to test the live "Connect" flow in Settings — the code ships ready regardless):
-   - [Google Cloud Console](https://console.cloud.google.com/) → new or existing project → **APIs & Services → Library** → enable "Google Calendar API".
-   - **APIs & Services → OAuth consent screen** → External → add your Companies House-linked Google account as a test user (keeps it out of Google's review queue while testing).
-   - **APIs & Services → Credentials** → Create Credentials → OAuth client ID → Web application → Authorized redirect URI: `http://localhost:3000/api/calendar/callback/google` (add your production URL later too).
-   - Copy the Client ID and Client Secret into `.env` as `GOOGLE_CALENDAR_CLIENT_ID` / `GOOGLE_CALENDAR_CLIENT_SECRET`. Free.
-3. **Production Postgres + AWS** — not needed for development; only at actual deployment time.
+- **Print** prints the rows currently on screen (one page of results). Use **Export CSV** for the whole report. (The requirements document was not available in the repository; if full-report printing is required it is a separate change.)
+- **Share** copies the report URL. The link is not public: it opens only for signed-in users who may see that report (its owner, and Admins/Super Admins). Teammates with the `USER` role cannot open someone else's report.
 
-## Daily update pipeline (production shape)
-
-- `npm run ch:bulk-ingest` / `npm run ch:daily-update` are short-running jobs — an **AWS EventBridge scheduled rule → Lambda or ECS Fargate task** is the right shape.
-- `npm run ch:stream` holds a persistent HTTP connection open — it needs an **always-on process (ECS/Fargate task, not Lambda)**, since Lambda's execution-time limit is wrong for a long-lived stream consumer.
-
-## Useful scripts
+## Operations
 
 ```bash
-npm run db:studio        # browse the local database
-npm run db:push          # re-sync schema.prisma to the dev database
-npm run db:seed          # reset and reseed development data
-npm run ch:bulk-ingest -- --status active --limit 2000 --enrich 200   # real data, Advanced Search API
-npm run ch:bulk-ingest -- --csv [--limit N]                            # real data, full monthly bulk CSV
-npm run ch:stream         # long-lived filing-stream consumer (Ctrl+C to stop)
-npm run ch:daily-update   # run the daily update job once, manually
-npm run lint
-npx tsc --noEmit
-npm run build
+npm run ch:bulk-ingest -- --input <zip|csv|url> [--limit N]   # monthly bulk file; --resume <runId> to continue an interrupted run
+npm run ch:bulk-ingest -- --search --status active --limit 2000 --enrich 200   # small real sample via Advanced Search
+npm run ch:stream                # always-on DS01 stream worker (reconnects, resumes from checkpoint)
+npm run ch:daily-update          # overdue flags, pending DS01 events, officer backfill, report refresh
+npm run jobs:scheduler           # in-process scheduler (daily 03:00 UTC; monthly ingest only if MONTHLY_INGEST_ENABLED=1)
 ```
+
+- Loading the full register requires the explicit flag `--i-understand-this-is-the-full-register`; without `--limit` a full-size file is refused.
+- The bulk loader reads the `.zip` Companies House publishes (streamed, never fully in memory), validates the header, parses `DD/MM/YYYY`, maps categories explicitly (unknown values are recorded and reported, never dropped), and requires a **UTF-8** database.
+- Run outcome: `success` (no errors, or ≤0.1 % rows failed/skipped) · `partial` (≤5 %) · `failed` (>5 %, or nothing read). Row counters, error samples and unknown categories are stored on the run and shown in Settings / Super Admin.
+- A run with no heartbeat for 10 minutes is shown as `stalled` and reconciled to `failed`. Only one bulk/daily/backfill job of a kind runs at a time.
+- **Stream delivery is at-least-once with idempotent processing**, not exactly-once: DS01/DS02 events are persisted before the checkpoint moves; after a drop/restart the stream is replayed from the checkpoint and the unique `transactionId` absorbs duplicates. If Companies House no longer holds the checkpoint (long downtime) the gap is logged and counted — those events cannot be recovered from the stream.
+- Health: `GET /api/health` (public: ok/degraded/down; Super Admin session adds job detail). Logs are JSON lines in production (`LOG_FORMAT=json|text`).
+- AWS shape: stream worker = always-on ECS/Fargate task; daily update/bulk = EventBridge scheduled task (or the built-in scheduler); PostgreSQL = RDS (UTF-8, `sslmode=require`). Not yet validated on AWS.
+
+## Testing
+
+```bash
+npm run typecheck && npm run lint
+npm test                              # unit tests (dates, mapping, filters, CSV safety, password policy, ZIP input, ...)
+npm run build && npm run test:integration   # scratch PostgreSQL + production build: security, sessions, CRM, filters, ingestion, resume, stream (mock Companies House)
+DATABASE_URL=<empty scratch db> npx tsx tests/acceptance/ingest-100k.ts tmp-ingest/sample-100k.zip   # 100k-row acceptance test
+```
+
+CI (`.github/workflows/ci.yml`) runs typecheck, lint, unit tests, build and the integration suite on every push.

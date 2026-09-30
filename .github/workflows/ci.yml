@@ -1,0 +1,34 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      # The build prerenders the landing page, which reads the database, so the
+      # scratch cluster for the build is the same throwaway one the tests use.
+      - name: Start scratch PostgreSQL for the build
+        run: |
+          DEV_PG_DIR=.pgdata DEV_PG_PORT=5433 nohup npx tsx scripts/dev-db.ts > pg.log 2>&1 &
+          sleep 25
+          DATABASE_URL="postgresql://director:director_dev_local@127.0.0.1:5433/director?schema=public" npx prisma migrate deploy
+      - run: npm run build
+        env:
+          DATABASE_URL: postgresql://director:director_dev_local@127.0.0.1:5433/director?schema=public
+          AUTH_SECRET: ci-build-only-secret-not-used-at-runtime-0123456789
+      - run: npm run test:integration
+        env:
+          AUTH_SECRET: ci-build-only-secret-not-used-at-runtime-0123456789

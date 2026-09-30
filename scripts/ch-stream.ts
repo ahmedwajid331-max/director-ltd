@@ -4,6 +4,9 @@
 // Reconnects automatically and resumes from the stored checkpoint.
 import { runStreamWorker } from "../src/lib/companies-house/streamWorker";
 import { db } from "../src/lib/db";
+import { makeLogger } from "../src/lib/log";
+
+const logger = makeLogger("stream");
 
 const args = process.argv.slice(2);
 const maxSeconds = args.includes("--max-seconds") ? Number(args[args.indexOf("--max-seconds") + 1]) : undefined;
@@ -19,14 +22,14 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
 runStreamWorker({
   signal: controller.signal,
   maxRuntimeMs: maxSeconds ? maxSeconds * 1000 : undefined,
-  onEvent: (msg) => console.log(`[${new Date().toISOString()}] ${msg}`),
+  onEvent: (msg) => logger.info(msg),
 })
   .then(async () => {
     await db.$disconnect();
     process.exit(0);
   })
   .catch(async (err) => {
-    console.error("Stream worker failed:", err instanceof Error ? err.message : err);
+    logger.error("Stream worker failed", { error: err instanceof Error ? err.message : String(err) });
     await db.$disconnect().catch(() => {});
     process.exit(1);
   });

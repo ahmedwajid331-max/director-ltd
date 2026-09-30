@@ -10,6 +10,9 @@ import { runDailyUpdate } from "../src/lib/companies-house/dailyUpdate";
 import { bulkIngestFromCsv } from "../src/lib/companies-house/bulkIngest";
 import { JobAlreadyRunningError, reconcileStaleRuns } from "../src/lib/jobs/runs";
 import { db } from "../src/lib/db";
+import { makeLogger } from "../src/lib/log";
+
+const logger = makeLogger("scheduler");
 
 const DAILY_HOUR = Number(process.env.DAILY_UPDATE_UTC_HOUR ?? 3);
 const MONTHLY_DAY = Number(process.env.MONTHLY_INGEST_DAY ?? 3);
@@ -18,7 +21,7 @@ const MONTHLY_ENABLED = process.env.MONTHLY_INGEST_ENABLED === "1";
 
 let lastDaily = "";
 let lastMonthly = "";
-const log = (m: string) => console.log(`[${new Date().toISOString()}] ${m}`);
+const log = (m: string) => logger.info(m);
 
 async function tick() {
   const now = new Date();

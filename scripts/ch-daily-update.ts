@@ -4,15 +4,18 @@
 //   npm run ch:daily-update
 import { runDailyUpdate } from "../src/lib/companies-house/dailyUpdate";
 import { db } from "../src/lib/db";
+import { makeLogger } from "../src/lib/log";
+
+const logger = makeLogger("daily-update");
 
 runDailyUpdate()
   .then(async (result) => {
-    console.log("Daily update complete:", result);
+    logger.info("Daily update complete", { ...result });
     await db.$disconnect();
     process.exit(0);
   })
   .catch(async (err) => {
-    console.error("Daily update failed:", err instanceof Error ? err.message : err);
+    logger.error("Daily update failed", { error: err instanceof Error ? err.message : String(err) });
     await db.$disconnect().catch(() => {});
     process.exit(1);
   });

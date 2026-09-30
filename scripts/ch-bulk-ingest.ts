@@ -15,6 +15,9 @@
 import fs from "node:fs";
 import { bulkIngestFromCsv, bulkIngestFromSearch } from "../src/lib/companies-house/bulkIngest";
 import { db } from "../src/lib/db";
+import { makeLogger } from "../src/lib/log";
+
+const logger = makeLogger("bulk-ingest");
 
 const args = process.argv.slice(2);
 const has = (f: string) => args.includes(f);
@@ -75,9 +78,9 @@ async function main() {
     batchSize: val("--batch") ? Number(val("--batch")) : undefined,
     resumeRunId,
     signal: controller.signal,
-    log: (m) => console.log(m),
+    log: (m) => logger.info(m.trim()),
   });
-  console.log("Done:", result);
+  logger.info("Bulk CSV ingest finished", { ...result });
   if (result.status === "failed") process.exitCode = 1;
 }
 
