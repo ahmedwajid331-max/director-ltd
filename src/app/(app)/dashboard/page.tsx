@@ -6,6 +6,8 @@ import { StatCard } from "@/components/ui/StatCard";
 import { LinkButton } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { formatDate } from "@/lib/data/format";
+import { REAL_COMPANIES_WHERE, seedDataVisible, visibleCompaniesWhere } from "@/lib/data/scope";
+import { coverageLabel } from "@/lib/jobs/display";
 
 export const metadata: Metadata = { title: "Overview" };
 
@@ -21,8 +23,8 @@ export default async function DashboardPage() {
   weekFromNow.setDate(weekFromNow.getDate() + 7);
 
   const [companiesStored, realCompanies, followedCount, dueFollowUps, savedReports, recentActivity] = await Promise.all([
-    db.company.count(),
-    db.company.count({ where: { source: { not: "seed" } } }),
+    db.company.count({ where: visibleCompaniesWhere() }),
+    db.company.count({ where: REAL_COMPANIES_WHERE }),
     db.userCompanyState.count({ where: { userId: session.userId, followed: true } }),
     db.followUp.count({ where: { userId: session.userId, done: false, dueDate: { lte: weekFromNow } } }),
     db.report.count({ where: { ownerId: session.userId } }),
@@ -47,7 +49,7 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Companies stored" value={companiesStored.toLocaleString()} icon={Building2} accent="indigo" />
+        <StatCard label="Companies searchable" value={companiesStored.toLocaleString()} icon={Building2} accent="indigo" />
         <StatCard label="Followed companies" value={followedCount.toLocaleString()} icon={Star} accent="amber" />
         <StatCard label="Follow-ups due (7 days)" value={dueFollowUps.toLocaleString()} icon={BellRing} accent="emerald" />
         <StatCard label="Saved reports" value={savedReports.toLocaleString()} icon={BookMarked} accent="slate" />
@@ -78,14 +80,12 @@ export default async function DashboardPage() {
       </div>
 
       <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-5 py-4 text-xs text-slate-500">
-        {realCompanies > 0 ? (
-          <>
-            {realCompanies.toLocaleString()} of {companiesStored.toLocaleString()} companies are live Companies
-            House data; the rest is development seed data.
-          </>
-        ) : (
-          <>Running entirely on seeded development data — no live Companies House data ingested yet.</>
-        )}{" "}
+        <>
+          Companies House coverage: {coverageLabel(realCompanies)}.
+          {seedDataVisible() && companiesStored > realCompanies
+            ? ` ${(companiesStored - realCompanies).toLocaleString()} of the companies shown are synthetic development data, not Companies House.`
+            : ""}
+        </>{" "}
         See <a href="/settings" className="font-medium text-indigo-600 hover:text-indigo-700">Settings</a> for
         pipeline status.
       </div>
@@ -104,6 +104,10 @@ function describeAction(action: string, meta: string | null): string {
       return `${data.followed ? "Followed" : "Unfollowed"} ${data.companyName}`;
     case "company_trash_toggle":
       return `${data.trashed ? "Sent to trash" : "Restored"} ${data.companyName}`;
+    case "search":
+      return `Searched${data.q ? ` "${data.q}"` : ""}${data.activeRules ? ` with ${data.activeRules} filter${data.activeRules > 1 ? "s" : ""}` : ""} (${data.total} results)`;
+    case "export_csv":
+      return `Exported ${data.rows ?? "?"} companies to CSV`;
     case "director_contact_added":
       return `Added contact "${data.name}"`;
     default:

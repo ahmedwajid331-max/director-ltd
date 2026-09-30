@@ -5,7 +5,7 @@ import { getCompanyById } from "@/lib/data/companies";
 import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 import { Badge } from "@/components/ui/Badge";
-import { formatAddress, formatDate, STATUS_LABELS, STATUS_TONE, typeLabel, companyAgeYears } from "@/lib/data/format";
+import { formatAddress, formatDate, formatDateOnly, STATUS_LABELS, STATUS_TONE, typeLabel, companyAgeYears } from "@/lib/data/format";
 import type { CompanyStatus } from "@/lib/types";
 import { CompanyDetailClient } from "@/components/companies/CompanyDetailClient";
 import { isRestConfigured } from "@/lib/companies-house/client";
@@ -40,6 +40,12 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
     include: { notes: { orderBy: { createdAt: "desc" } }, followUps: { orderBy: { dueDate: "asc" } } },
   });
 
+  // CRM contacts are private to this user and separate from CH officers.
+  const crmContacts = await db.crmContact.findMany({
+    where: { userId: session.userId, companyId: id },
+    orderBy: { createdAt: "asc" },
+  });
+
   return (
     <div className="space-y-6">
       <Link href="/companies" className="inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-700">
@@ -56,7 +62,7 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
           </div>
           <p className="mt-1 text-sm text-slate-500">
             Company number {company.companyNumber} · {typeLabel(company.type)} · Incorporated{" "}
-            {formatDate(company.incorporationDate)} ({companyAgeYears(company.incorporationDate)} yrs)
+            {formatDateOnly(company.incorporationDate)} ({companyAgeYears(company.incorporationDate)} yrs)
           </p>
           <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-400">
             {company.source === "seed" ? (
@@ -82,7 +88,7 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
         <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
           <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Accounts</p>
           <p className="mt-1 text-sm text-slate-700">
-            Next due {formatDate(company.accountsNextDue)}
+            Next due {formatDateOnly(company.accountsNextDue)}
             {company.accountsOverdue && (
               <Badge tone="red" className="ml-2">
                 Overdue
@@ -93,7 +99,7 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
         <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
           <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Confirmation statement</p>
           <p className="mt-1 text-sm text-slate-700">
-            Next due {formatDate(company.confirmationNextDue)}
+            Next due {formatDateOnly(company.confirmationNextDue)}
             {company.confirmationOverdue && (
               <Badge tone="red" className="ml-2">
                 Overdue
@@ -107,16 +113,28 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
         companyId={company.id}
         initialFollowed={state?.followed ?? false}
         initialTrashed={state?.trashed ?? false}
-        initialDirectors={company.directors.map((d) => ({
-          id: d.id,
-          name: d.name,
-          role: d.role,
-          occupation: d.occupation,
-          email: d.email,
-          phone: d.phone,
-          manuallyAdded: d.manuallyAdded,
-          appointedOn: d.appointedOn ? d.appointedOn.toISOString() : null,
-        }))}
+        initialDirectors={[
+          ...company.directors.map((d) => ({
+            id: d.id,
+            name: d.name,
+            role: d.role,
+            occupation: d.occupation,
+            email: null,
+            phone: null,
+            manuallyAdded: false,
+            appointedOn: d.appointedOn ? d.appointedOn.toISOString() : null,
+          })),
+          ...crmContacts.map((c) => ({
+            id: c.id,
+            name: c.name,
+            role: c.role,
+            occupation: c.occupation,
+            email: c.email,
+            phone: c.phone,
+            manuallyAdded: true,
+            appointedOn: null,
+          })),
+        ]}
         initialNotes={(state?.notes ?? []).map((n) => ({
           id: n.id,
           body: n.body,

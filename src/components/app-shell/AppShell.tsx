@@ -15,13 +15,13 @@ export function AppShell({
   role,
   userName,
   userEmail,
-  hasRealData,
+  realCompanyCount,
   children,
 }: {
   role: UserRole;
   userName: string;
   userEmail: string;
-  hasRealData: boolean;
+  realCompanyCount: number;
   children: React.ReactNode;
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -32,7 +32,7 @@ export function AppShell({
 
   return (
     <div className="flex min-h-screen bg-slate-50">
-      <Sidebar role={role} hasRealData={hasRealData} />
+      <Sidebar role={role} realCompanyCount={realCompanyCount} />
 
       {mobileOpen && (
         <div className="fixed inset-0 z-40 lg:hidden">

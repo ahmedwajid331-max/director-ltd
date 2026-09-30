@@ -198,7 +198,7 @@ export function CompanyDetailClient({
                     </div>
                     <div className="mt-0.5 text-xs text-slate-500">
                       {d.role} {d.occupation ? `· ${d.occupation}` : ""}
-                      {d.appointedOn ? ` · appointed ${formatDate(d.appointedOn)}` : ""}
+                      {d.appointedOn ? ` · appointed ${formatDateOnly(d.appointedOn)}` : ""}
                     </div>
                     <div className="mt-1 flex gap-3 text-xs text-slate-500">
                       {d.email && (

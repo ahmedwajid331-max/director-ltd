@@ -1,6 +1,7 @@
 import { chRestGetWithRateInfo } from "./client";
+import { parseChDate } from "./csv/dates";
 
-// Shape of the real GET /company/{number} response — only the fields we
+// Shape of the real GET /company/{number} response - only the fields we
 // actually use. Companies House returns more than this; unused fields are
 // intentionally left untyped rather than guessed at.
 export interface CompaniesHouseProfile {
@@ -9,7 +10,7 @@ export interface CompaniesHouseProfile {
   company_status: string;
   company_status_detail?: string;
   type: string;
-  date_of_creation: string;
+  date_of_creation?: string;
   date_of_cessation?: string;
   registered_office_address?: {
     address_line_1?: string;
@@ -30,6 +31,7 @@ export interface CompaniesHouseProfile {
   };
   confirmation_statement?: {
     next_due?: string;
+    last_made_up_to?: string;
     overdue?: boolean;
   };
   sic_codes?: string[];
@@ -39,38 +41,49 @@ export async function fetchCompanyProfile(companyNumber: string): Promise<Compan
   return chRestGetWithRateInfo<CompaniesHouseProfile>(`/company/${encodeURIComponent(companyNumber)}`);
 }
 
+export const STRIKE_OFF_STATUS_DETAIL = "active-proposal-to-strike-off";
+
 // Maps a real CH profile response to our Company upsert shape. `dormant`
-// is derived strictly from accounts.last_accounts.type — never from
+// is derived strictly from accounts.last_accounts.type - never from
 // company_status, per the explicit product requirement.
-export function mapProfileToCompanyUpsert(profile: CompaniesHouseProfile, source: "bulk_import" | "stream" | "rest_enrichment") {
+//
+// `existingDs01FiledAt` is the event-derived DS01 date already stored for the
+// company (if any). DS01 is sticky: a profile that does not (yet) show the
+// strike-off status detail must not erase a DS01 the stream already recorded.
+export function mapProfileToCompanyUpsert(
+  profile: CompaniesHouseProfile,
+  source: "advanced_search" | "bulk_import" | "stream" | "rest_enrichment",
+  existingDs01FiledAt: Date | null = null
+) {
   const address = profile.registered_office_address ?? {};
   const accountType = profile.accounts?.last_accounts?.type ?? null;
+  const incorporationDate = parseChDate(profile.date_of_creation);
+  if (!incorporationDate) {
+    throw new Error(`Company ${profile.company_number} has no usable date_of_creation`);
+  }
 
   return {
-    companyNumber: profile.company_number,
+    companyNumber: profile.company_number.toUpperCase(),
     name: profile.company_name,
     status: profile.company_status,
     statusDetail: profile.company_status_detail ?? null,
     type: profile.type,
-    incorporationDate: new Date(profile.date_of_creation),
-    dissolutionDate: profile.date_of_cessation ? new Date(profile.date_of_cessation) : null,
+    incorporationDate,
+    dissolutionDate: parseChDate(profile.date_of_cessation),
     dormant: accountType === "dormant",
     accountType,
     registeredAddress1: address.address_line_1 ?? "",
     registeredAddress2: address.address_line_2 ?? null,
     registeredCity: address.locality ?? "",
-    registeredPostcode: address.postal_code ?? "",
+    registeredPostcode: (address.postal_code ?? "").toUpperCase(),
     registeredCounty: address.region ?? null,
-    accountsNextDue: profile.accounts?.next_due ? new Date(profile.accounts.next_due) : null,
-    accountsLastMadeUp: profile.accounts?.last_accounts?.made_up_to
-      ? new Date(profile.accounts.last_accounts.made_up_to)
-      : null,
+    accountsNextDue: parseChDate(profile.accounts?.next_due),
+    accountsLastMadeUp: parseChDate(profile.accounts?.last_accounts?.made_up_to),
     accountsOverdue: profile.accounts?.overdue ?? false,
-    confirmationNextDue: profile.confirmation_statement?.next_due
-      ? new Date(profile.confirmation_statement.next_due)
-      : null,
+    confirmationNextDue: parseChDate(profile.confirmation_statement?.next_due),
+    confirmationLastMadeUp: parseChDate(profile.confirmation_statement?.last_made_up_to),
     confirmationOverdue: profile.confirmation_statement?.overdue ?? false,
-    hasDS01: profile.company_status_detail === "active-proposal-to-strike-off",
+    hasDS01: profile.company_status_detail === STRIKE_OFF_STATUS_DETAIL || existingDs01FiledAt !== null,
     sicCodes: (profile.sic_codes ?? []).join(","),
     source,
     chLastFetchedAt: new Date(),

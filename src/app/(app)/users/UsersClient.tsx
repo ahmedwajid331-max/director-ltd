@@ -35,8 +35,8 @@ export function UsersClient({ initialUsers, canAssignRoles, currentUserId }: { i
 
   async function createUser() {
     setError(null);
-    if (!form.name.trim() || !form.email.trim() || form.password.length < 8) {
-      setError("Name, email and an 8+ character password are required.");
+    if (!form.name.trim() || !form.email.trim() || form.password.length < 12) {
+      setError("Name, email and a 12+ character password are required.");
       return;
     }
     setSaving(true);
@@ -60,12 +60,21 @@ export function UsersClient({ initialUsers, canAssignRoles, currentUserId }: { i
   }
 
   async function updateUser(id: string, patch: { active?: boolean; role?: UserRole }) {
+    const previous = users;
     setUsers((prev) => prev.map((u) => (u.id === id ? { ...u, ...patch } : u)));
-    await fetch(`/api/users/${id}`, {
+    const res = await fetch(`/api/users/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     });
+    if (!res.ok) {
+      // The server is the authority - roll the optimistic change back.
+      setUsers(previous);
+      const data = await res.json().catch(() => ({}));
+      setError(data.error ?? "That change was not allowed.");
+      return;
+    }
+    setError(null);
     router.refresh();
   }
 

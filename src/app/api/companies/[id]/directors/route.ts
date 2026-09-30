@@ -4,13 +4,17 @@ import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 
 const bodySchema = z.object({
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
   role: z.string().max(100).optional(),
   email: z.string().email().optional().or(z.literal("")),
   phone: z.string().max(50).optional(),
   occupation: z.string().max(150).optional(),
 });
 
+// Adds a *CRM contact* (a person the user actually deals with). It is stored
+// in its own table, private to the user, and deliberately does NOT touch the
+// Companies House officer list, directorCount or singleDirector - director
+// filters only ever reflect Companies House data.
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -19,27 +23,19 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const parsed = bodySchema.safeParse(await request.json().catch(() => ({})));
   if (!parsed.success) return NextResponse.json({ error: "Enter at least a name." }, { status: 400 });
 
-  const company = await db.company.findUnique({ where: { id } });
+  const company = await db.company.findUnique({ where: { id }, select: { id: true } });
   if (!company) return NextResponse.json({ error: "Company not found" }, { status: 404 });
 
-  const director = await db.director.create({
+  const contact = await db.crmContact.create({
     data: {
+      userId: session.userId,
       companyId: id,
       name: parsed.data.name,
       role: parsed.data.role || "contact",
       email: parsed.data.email || null,
       phone: parsed.data.phone || null,
       occupation: parsed.data.occupation || null,
-      manuallyAdded: true,
     },
-  });
-
-  // Keep the denormalized director count/single-director flag (used by the
-  // fast filter engine) consistent with the actual director rows.
-  const nextCount = company.directorCount + 1;
-  await db.company.update({
-    where: { id },
-    data: { directorCount: nextCount, singleDirector: nextCount === 1 },
   });
 
   await db.activityLog.create({
@@ -50,5 +46,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     },
   });
 
-  return NextResponse.json({ director });
+  // Same response shape the UI already consumed (it shows "manually added").
+  return NextResponse.json({ director: { ...contact, manuallyAdded: true, appointedOn: null, resignedOn: null, nationality: null } });
 }

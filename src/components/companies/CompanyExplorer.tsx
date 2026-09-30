@@ -118,8 +118,13 @@ export function CompanyExplorer({
       const res = await fetch("/api/companies/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filter, q }),
+        body: JSON.stringify({ filter, q, scope: scope === "followed" || scope === "trashed" ? scope : undefined }),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        window.alert(data.error ?? "Export failed.");
+        return;
+      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");

@@ -1,93 +1,186 @@
 import { db } from "@/lib/db";
-import { streamFilings } from "./client";
-import { syncCompanyProfile } from "./sync";
+import { CompaniesHouseRateLimitError, StreamOutOfRangeError, streamFilings } from "./client";
+import { applyFilingEvent, parseFilingEvent, persistFilingEvent, reconcilePendingFilingEvents, shouldStore } from "./filingEvents";
+import { finishRun, startRun, touchRun } from "@/lib/jobs/runs";
 
-interface FilingStreamEvent {
-  resource_uri?: string;
-  data?: {
-    type?: string;
-    date?: string;
-    description?: string;
-    transaction_id?: string;
-  };
+const CHECKPOINT_NAME = "filings";
+
+export interface StreamStats {
+  connects: number;
+  reconnects: number;
+  eventsSeen: number;
+  malformed: number;
+  stored: number;
+  duplicates: number;
+  applied: number;
+  pending: number;
+  gaps: number;
+  lastTimepoint: number | null;
 }
 
-function extractCompanyNumber(resourceUri: string): string | null {
-  const match = resourceUri.match(/\/company\/([^/]+)\/filing-history/);
-  return match ? match[1] : null;
+export interface StreamWorkerOptions {
+  signal?: AbortSignal;
+  onEvent?: (msg: string) => void;
+  maxRuntimeMs?: number; // stop cleanly after this long (tests, scheduled catch-up runs)
+  idleTimeoutMs?: number;
+  backoff?: { initialMs: number; maxMs: number };
 }
 
-// Long-lived consumer of the Companies House filing stream. Persists every
-// event to FilingEvent (transactionId is unique, so restarts/overlaps never
-// duplicate rows) and, for DS01 events specifically, fetches + upserts the
-// full company profile so hasDS01/statusDetail reflect reality within
-// seconds of the real filing. Intended to run as an always-on process (see
-// npm run ch:stream) — not a scheduled job, the connection itself is the
-// point.
-export async function runStreamWorker(options: { signal?: AbortSignal; onEvent?: (msg: string) => void } = {}) {
-  const run = await db.ingestionRun.create({ data: { kind: "stream_backfill", status: "running" } });
-  let rowsProcessed = 0;
-  let rowsFailed = 0;
+export async function loadCheckpoint(): Promise<number | null> {
+  const cp = await db.streamCheckpoint.findUnique({ where: { name: CHECKPOINT_NAME } });
+  return cp ? Number(cp.timepoint) : null;
+}
+
+async function saveCheckpoint(timepoint: number) {
+  await db.streamCheckpoint.upsert({
+    where: { name: CHECKPOINT_NAME },
+    create: { name: CHECKPOINT_NAME, timepoint: BigInt(timepoint), lastEventAt: new Date() },
+    update: { timepoint: BigInt(timepoint), lastEventAt: new Date() },
+  });
+}
+
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+  });
+
+// Long-lived, self-healing consumer of the Companies House filing stream.
+//
+// Delivery guarantee: AT-LEAST-ONCE with idempotent processing (not
+// exactly-once). Every state-changing event (DS01/DS02) is persisted before
+// the checkpoint moves past it; after a crash or reconnect the stream is
+// replayed from the last checkpoint, and the unique transactionId makes the
+// replay harmless. If Companies House no longer holds the checkpoint
+// (downtime longer than its backlog) the gap is counted and logged loudly -
+// those events cannot be recovered from the stream.
+export async function runStreamWorker(options: StreamWorkerOptions = {}): Promise<StreamStats> {
   const log = options.onEvent ?? (() => {});
+  const backoff = options.backoff ?? { initialMs: 1000, maxMs: 60_000 };
+  const stats: StreamStats = {
+    connects: 0, reconnects: 0, eventsSeen: 0, malformed: 0, stored: 0, duplicates: 0, applied: 0, pending: 0, gaps: 0, lastTimepoint: null,
+  };
+
+  const run = await startRun("stream");
+  const started = Date.now();
+  const expired = () => options.maxRuntimeMs !== undefined && Date.now() - started >= options.maxRuntimeMs;
+  const stopped = () => options.signal?.aborted || expired();
+
+  const flushStats = () => touchRun(run.id, { rowsRead: stats.eventsSeen, rowsProcessed: stats.applied, statsJson: JSON.stringify(stats) }).catch(() => {});
+  const heartbeat = setInterval(flushStats, 30_000);
+  // Connection-scoped abort so maxRuntimeMs can end a healthy connection too.
+  const runtime = new AbortController();
+  options.signal?.addEventListener("abort", () => runtime.abort(), { once: true });
+  const runtimeTimer = options.maxRuntimeMs !== undefined ? setTimeout(() => runtime.abort(), options.maxRuntimeMs) : undefined;
+
+  let delay = backoff.initialMs;
+  let lastReconcile = Date.now();
+  let fatal: unknown = null;
 
   try {
-    log("Connecting to Companies House filing stream...");
-    for await (const raw of streamFilings(options.signal)) {
-      const event = raw as FilingStreamEvent;
-      const data = event.data;
-      if (!data?.transaction_id || !event.resource_uri) continue;
+    const rec = await reconcilePendingFilingEvents().catch(() => ({ applied: 0, stillPending: 0 }));
+    if (rec.applied) log(`Applied ${rec.applied} previously pending DS01/DS02 events`);
 
-      const companyNumber = extractCompanyNumber(event.resource_uri);
-      if (!companyNumber) continue;
-
+    while (!stopped()) {
+      let checkpoint = await loadCheckpoint();
+      let gotEvent = false;
+      let sinceSave = 0;
       try {
-        const existing = await db.filingEvent.findUnique({ where: { transactionId: data.transaction_id } });
-        if (existing) continue; // already processed — safe against duplicates/restarts
+        log(checkpoint ? `Connecting to filing stream, resuming from timepoint ${checkpoint}` : "Connecting to filing stream (live)");
+        stats.connects++;
+        if (stats.connects > 1) stats.reconnects++;
 
-        const company = await db.company.findUnique({ where: { companyNumber } });
+        for await (const { event: raw, timepoint } of streamFilings({ signal: runtime.signal, timepoint: checkpoint, idleTimeoutMs: options.idleTimeoutMs })) {
+          gotEvent = true;
+          delay = backoff.initialMs; // healthy connection: reset backoff
+          stats.eventsSeen++;
 
-        await db.filingEvent.create({
-          data: {
-            companyId: company?.id ?? null,
-            companyNumber,
-            transactionId: data.transaction_id,
-            type: data.type ?? "unknown",
-            date: data.date ?? null,
-            description: data.description ?? null,
-            resourceUri: event.resource_uri,
-          },
-        });
+          const parsed = parseFilingEvent(raw);
+          if (!parsed) {
+            stats.malformed++;
+          } else if (shouldStore(parsed.type)) {
+            const { status, id } = await persistFilingEvent(parsed);
+            if (status === "duplicate") stats.duplicates++;
+            else stats.stored++;
+            if (status === "created" || parsed.type === "DS01" || parsed.type === "DS02") {
+              try {
+                const res = await applyFilingEvent(id);
+                if (res === "applied") {
+                  stats.applied++;
+                  if (status === "created") log(`${parsed.type} filing applied: ${parsed.companyNumber}`);
+                } else stats.pending++;
+              } catch (err) {
+                if (err instanceof CompaniesHouseRateLimitError) stats.pending++;
+                else throw err;
+              }
+            }
+          }
 
-        if (data.type === "DS01") {
-          log(`DS01 filing: ${companyNumber}`);
-          await syncCompanyProfile(companyNumber, "stream");
+          if (timepoint !== null) {
+            stats.lastTimepoint = timepoint;
+            sinceSave++;
+            // State-changing events advance the checkpoint immediately (they
+            // are already persisted); the rest are batched.
+            if ((parsed && shouldStore(parsed.type)) || sinceSave >= 25) {
+              await saveCheckpoint(timepoint);
+              sinceSave = 0;
+            }
+          }
+
+          if (Date.now() - lastReconcile > 5 * 60_000) {
+            lastReconcile = Date.now();
+            await reconcilePendingFilingEvents().catch(() => {});
+          }
+          if (stopped()) break;
         }
-
-        rowsProcessed++;
-        if (rowsProcessed % 20 === 0) {
-          await db.ingestionRun.update({ where: { id: run.id }, data: { rowsProcessed, rowsFailed } });
-        }
+        if (stats.lastTimepoint !== null && sinceSave > 0) await saveCheckpoint(stats.lastTimepoint);
+        if (stopped()) break;
+        log("Stream connection closed by Companies House; reconnecting");
       } catch (err) {
-        rowsFailed++;
-        log(`Error processing event for ${companyNumber}: ${err instanceof Error ? err.message : err}`);
+        if (stats.lastTimepoint !== null && sinceSave > 0) await saveCheckpoint(stats.lastTimepoint).catch(() => {});
+        if (stopped()) break;
+
+        if (err instanceof StreamOutOfRangeError) {
+          stats.gaps++;
+          log(`GAP: checkpoint ${checkpoint} is no longer available from Companies House - events between it and now cannot be recovered. Resuming live.`);
+          await db.streamCheckpoint.deleteMany({ where: { name: CHECKPOINT_NAME } });
+          checkpoint = null;
+          continue;
+        }
+        if (err instanceof CompaniesHouseRateLimitError) {
+          log(`Stream rate limited; waiting ${Math.round(err.retryAfterMs / 1000)}s`);
+          await sleep(err.retryAfterMs, runtime.signal);
+          continue;
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        // Bad credentials are not transient - stop instead of hammering the API.
+        if (/HTTP 40[13]/.test(message)) {
+          fatal = err;
+          break;
+        }
+        log(`Stream error: ${message}. Reconnecting in ${Math.round(delay / 1000)}s`);
+        await sleep(delay, runtime.signal);
+        delay = Math.min(backoff.maxMs, delay * 2);
+        continue;
+      }
+      if (!gotEvent) {
+        await sleep(delay, runtime.signal);
+        delay = Math.min(backoff.maxMs, delay * 2);
       }
     }
-
-    await db.ingestionRun.update({
-      where: { id: run.id },
-      data: { status: "success", finishedAt: new Date(), rowsProcessed, rowsFailed },
-    });
   } catch (err) {
-    await db.ingestionRun.update({
-      where: { id: run.id },
-      data: {
-        status: options.signal?.aborted ? "success" : "failed",
-        finishedAt: new Date(),
-        rowsProcessed,
-        rowsFailed,
-        errorMessage: options.signal?.aborted ? null : err instanceof Error ? err.message : String(err),
-      },
-    });
-    if (!options.signal?.aborted) throw err;
+    fatal = err;
+  } finally {
+    clearInterval(heartbeat);
+    if (runtimeTimer) clearTimeout(runtimeTimer);
   }
+
+  const patch = { rowsRead: stats.eventsSeen, rowsProcessed: stats.applied, rowsFailed: stats.malformed, statsJson: JSON.stringify(stats) };
+  if (fatal) {
+    await finishRun(run.id, "failed", { ...patch, errorMessage: fatal instanceof Error ? fatal.message : String(fatal) });
+    throw fatal;
+  }
+  await finishRun(run.id, "success", patch);
+  log(`Stream worker stopped: ${JSON.stringify(stats)}`);
+  return stats;
 }

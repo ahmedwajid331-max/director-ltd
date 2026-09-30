@@ -4,7 +4,7 @@ import Link from "next/link";
 import { ArrowUp, ArrowDown, Star, Trash2, RotateCcw, Building2 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { formatDate, STATUS_LABELS, STATUS_TONE } from "@/lib/data/format";
+import { formatDateOnly, STATUS_LABELS, STATUS_TONE } from "@/lib/data/format";
 import type { SortableField } from "@/lib/data/companies";
 import { cn } from "@/lib/cn";
 
@@ -94,7 +94,7 @@ export function ResultsTable({
               <td className="px-4 py-3">
                 <Badge tone={STATUS_TONE[row.status]}>{STATUS_LABELS[row.status]}</Badge>
               </td>
-              <td className="px-4 py-3 text-slate-600">{formatDate(row.incorporationDate)}</td>
+              <td className="px-4 py-3 text-slate-600">{formatDateOnly(row.incorporationDate)}</td>
               <td className="px-4 py-3 text-slate-600">{row.registeredPostcode}</td>
               <td className="px-4 py-3 text-slate-600">
                 {row.directorCount}

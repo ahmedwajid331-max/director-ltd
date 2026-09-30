@@ -2,14 +2,15 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
-import { compileFilterToWhere } from "@/lib/filters/compile";
-import { isSortableField, searchCompanies } from "@/lib/data/companies";
-import type { Prisma } from "@prisma/client";
+import { buildCompanyWhere, isSortableField, searchCompanies } from "@/lib/data/companies";
+import { filterErrorResponse } from "@/lib/api/filter-errors";
+import { parseFilter } from "@/lib/filters/validate";
+import { countActiveRules } from "@/lib/filters/types";
 
 const bodySchema = z.object({
-  filter: z.any().optional(),
-  q: z.string().optional(),
-  page: z.number().int().min(1).default(1),
+  filter: z.unknown().optional(),
+  q: z.string().max(200).optional(),
+  page: z.number().int().min(1).max(1_000_000).default(1),
   pageSize: z.number().int().min(1).max(100).default(25),
   sortField: z.string().optional(),
   sortDir: z.enum(["asc", "desc"]).optional(),
@@ -25,50 +26,14 @@ export async function POST(request: Request) {
 
   const { filter, q, page, pageSize, sortField, sortDir, scope } = parsed.data;
 
-  let where: Prisma.CompanyWhereInput = compileFilterToWhere(filter ?? null);
-
-  if (q && q.trim()) {
-    const term = q.trim();
-    where = {
-      AND: [
-        where,
-        {
-          OR: [
-            { name: { contains: term } },
-            { companyNumber: { contains: term } },
-            { registeredPostcode: { contains: term } },
-          ],
-        },
-      ],
-    };
-  }
-
-  if (scope === "followed" || scope === "trashed") {
-    where = {
-      AND: [
-        where,
-        {
-          userStates: {
-            some: {
-              userId: session.userId,
-              ...(scope === "followed" ? { followed: true } : { trashed: true }),
-            },
-          },
-        },
-      ],
-    };
-  } else {
-    // Default view excludes trashed companies for this user.
-    where = {
-      AND: [
-        where,
-        {
-          NOT: {
-            userStates: { some: { userId: session.userId, trashed: true } },
-          },
-        },
-      ],
-    };
+  let where;
+  try {
+    // Default view excludes the user's trashed companies.
+    where = buildCompanyWhere({ filter, q, scope: scope ?? "all", userId: session.userId });
+  } catch (err) {
+    const res = filterErrorResponse(err);
+    if (res) return res;
+    throw err;
   }
 
   const result = await searchCompanies({
@@ -78,6 +43,23 @@ export async function POST(request: Request) {
     page,
     pageSize,
   });
+
+  // Super Admin visibility: record meaningful searches (a filter or search
+  // term, first page). Identical repeats within a minute (re-sorts, tab
+  // switches) are collapsed so the log stays readable.
+  if (page === 1) {
+    const checked = parseFilter(filter ?? null);
+    const activeRules = checked.ok && checked.filter ? countActiveRules(checked.filter) : 0;
+    const term = q?.trim() || null;
+    if (activeRules > 0 || term) {
+      const meta = JSON.stringify({ activeRules, q: term?.slice(0, 80) ?? null, scope: scope ?? "all", total: result.total });
+      const recent = await db.activityLog.findFirst({
+        where: { userId: session.userId, action: "search", meta, createdAt: { gt: new Date(Date.now() - 60_000) } },
+        select: { id: true },
+      });
+      if (!recent) await db.activityLog.create({ data: { userId: session.userId, action: "search", meta } });
+    }
+  }
 
   const states = await db.userCompanyState.findMany({
     where: { userId: session.userId, companyId: { in: result.rows.map((r) => r.id) } },

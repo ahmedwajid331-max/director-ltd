@@ -5,19 +5,14 @@ import { db } from "@/lib/db";
 import { Badge } from "@/components/ui/Badge";
 import { CardHeader } from "@/components/ui/Card";
 import { formatDate } from "@/lib/data/format";
+import { RUN_KIND_LABELS, RUN_KINDS, coverageLabel, loadLatestRuns } from "@/lib/jobs/display";
 import { isRestConfigured, isStreamConfigured } from "@/lib/companies-house/client";
 import { isGoogleCalendarConfigured } from "@/lib/calendar/providers/google";
+import { seedDataVisible } from "@/lib/data/scope";
 import { CalendarSettingsClient } from "./CalendarSettingsClient";
 
 export const metadata: Metadata = { title: "Settings" };
 
-const RUN_KINDS = ["bulk_csv", "stream_backfill", "officer_backfill", "daily_update"] as const;
-const RUN_KIND_LABELS: Record<string, string> = {
-  bulk_csv: "Bulk / search ingestion",
-  stream_backfill: "Filing stream",
-  officer_backfill: "Officer backfill",
-  daily_update: "Daily update",
-};
 
 export default async function SettingsPage() {
   const session = await requireSession();
@@ -31,11 +26,7 @@ export default async function SettingsPage() {
       _count: { _all: true },
       where: { source: { not: "seed" } },
     }),
-    Promise.all(
-      RUN_KINDS.map((kind) =>
-        db.ingestionRun.findFirst({ where: { kind }, orderBy: { startedAt: "desc" } })
-      )
-    ),
+    loadLatestRuns(),
     db.calendarConnection.findMany({ where: { userId: session.userId } }),
   ]);
 
@@ -90,11 +81,17 @@ export default async function SettingsPage() {
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">
               Companies stored ({totalCompanies.toLocaleString()} total)
             </p>
+            <p className="mb-2 text-sm text-slate-700">Real data coverage: {coverageLabel(realCompanies)}</p>
+            <p className="mb-2 text-xs text-slate-500">
+              {seedDataVisible()
+                ? "Development (synthetic) data is currently visible in search and reports."
+                : "Development (synthetic) data is hidden from search, reports and exports."}
+            </p>
             <div className="space-y-1">
               {sourceBreakdown.map((row) => (
                 <div key={row.source} className="flex items-center justify-between text-sm">
                   <span className="text-slate-600">
-                    {row.source === "seed" ? "Development (synthetic) data" : row.source}
+                    {row.source === "seed" ? "Development (synthetic) data - not Companies House" : row.source}
                   </span>
                   <span className="font-medium text-slate-900">{row._count._all.toLocaleString()}</span>
                 </div>
@@ -118,17 +115,14 @@ export default async function SettingsPage() {
               Pipeline runs
             </p>
             <div className="divide-y divide-slate-100">
-              {latestRuns.map((run, i) => (
+              {latestRuns.map((v, i) => (
                 <div key={RUN_KINDS[i]} className="flex items-center justify-between px-3 py-2 text-sm">
                   <span className="text-slate-600">{RUN_KIND_LABELS[RUN_KINDS[i]]}</span>
-                  {run ? (
+                  {v.run ? (
                     <span className="flex items-center gap-2">
-                      <Badge
-                        tone={run.status === "success" ? "green" : run.status === "running" ? "blue" : run.status === "partial" ? "amber" : "red"}
-                      >
-                        {run.status}
-                      </Badge>
-                      <span className="text-xs text-slate-400">{formatDate(run.finishedAt ?? run.startedAt)}</span>
+                      <Badge tone={v.tone}>{v.status}</Badge>
+                      {v.detail && <span className="text-xs text-slate-400">{v.detail}</span>}
+                      <span className="text-xs text-slate-400">{formatDate(v.run.finishedAt ?? v.run.startedAt)}</span>
                     </span>
                   ) : (
                     <span className="text-xs text-slate-400">Never run</span>

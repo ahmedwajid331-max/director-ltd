@@ -1,24 +1,32 @@
-// Long-lived filing-stream consumer for local dev.
-//   npm run ch:stream
-// Ctrl+C to stop cleanly (the run is marked "success" on a clean abort,
-// "failed" on an actual connection error).
+// Long-lived filing-stream consumer (run as an always-on process).
+//   npm run ch:stream                     run until stopped (Ctrl+C / SIGTERM: clean stop)
+//   npm run ch:stream -- --max-seconds 60 run for a bounded time (tests / catch-up)
+// Reconnects automatically and resumes from the stored checkpoint.
 import { runStreamWorker } from "../src/lib/companies-house/streamWorker";
 import { db } from "../src/lib/db";
 
-const controller = new AbortController();
-process.on("SIGINT", () => {
-  console.log("\nStopping stream worker...");
-  controller.abort();
-});
+const args = process.argv.slice(2);
+const maxSeconds = args.includes("--max-seconds") ? Number(args[args.indexOf("--max-seconds") + 1]) : undefined;
 
-runStreamWorker({ signal: controller.signal, onEvent: (msg) => console.log(msg) })
+const controller = new AbortController();
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    console.log(`\n${sig} received - stopping stream worker...`);
+    controller.abort();
+  });
+}
+
+runStreamWorker({
+  signal: controller.signal,
+  maxRuntimeMs: maxSeconds ? maxSeconds * 1000 : undefined,
+  onEvent: (msg) => console.log(`[${new Date().toISOString()}] ${msg}`),
+})
   .then(async () => {
-    console.log("Stream worker stopped.");
     await db.$disconnect();
     process.exit(0);
   })
   .catch(async (err) => {
-    console.error("Stream worker failed:", err);
+    console.error("Stream worker failed:", err instanceof Error ? err.message : err);
     await db.$disconnect().catch(() => {});
     process.exit(1);
   });

@@ -2,6 +2,8 @@ import { faker } from "@faker-js/faker";
 import { PrismaClient } from "@prisma/client";
 import type { CompanyStatus, CommonCompanyType, AccountType } from "../src/lib/types";
 import bcrypt from "bcryptjs";
+import { randomBytes } from "node:crypto";
+import fs from "node:fs";
 
 const db = new PrismaClient();
 
@@ -84,32 +86,44 @@ function randomPastDate(minYears: number, maxYears: number): Date {
   return d;
 }
 
+// Development-only data. Refuses to run against a production database, never
+// touches real (non-seed) companies, and never prints or commits credentials:
+// generated demo passwords are written to ./.dev-credentials.local (gitignored).
 async function main() {
-  console.log("Resetting existing data...");
-  await db.calendarEvent.deleteMany();
-  await db.followUp.deleteMany();
-  await db.note.deleteMany();
-  await db.userCompanyState.deleteMany();
-  await db.director.deleteMany();
-  await db.filingEvent.deleteMany();
-  await db.report.deleteMany();
-  await db.activityLog.deleteMany();
-  await db.calendarConnection.deleteMany();
-  await db.ingestionRun.deleteMany();
-  await db.company.deleteMany();
-  await db.user.deleteMany();
+  if (process.env.NODE_ENV === "production" && process.env.ALLOW_SEED !== "1") {
+    throw new Error("Refusing to seed a production environment (set ALLOW_SEED=1 to override).");
+  }
 
-  console.log("Creating users...");
-  const passwordHash = await bcrypt.hash("DirectorAdmin123!", 10);
-  const superAdmin = await db.user.create({
-    data: { email: "admin@director.ltd", name: "Nick", passwordHash, role: "SUPER_ADMIN" },
-  });
-  await db.user.create({
-    data: { email: "ops@director.ltd", name: "Priya Shah", passwordHash, role: "ADMIN" },
-  });
-  const salesUser = await db.user.create({
-    data: { email: "sales@director.ltd", name: "Tom Reid", passwordHash, role: "USER" },
-  });
+  console.log("Removing previous seed companies (real Companies House data is left untouched)...");
+  await db.company.deleteMany({ where: { source: "seed" } });
+
+  console.log("Ensuring development users exist...");
+  const demoUsers = [
+    { email: "admin@director.ltd", name: "Nick", role: "SUPER_ADMIN" },
+    { email: "ops@director.ltd", name: "Priya Shah", role: "ADMIN" },
+    { email: "sales@director.ltd", name: "Tom Reid", role: "USER" },
+  ];
+  const credentialLines: string[] = [];
+  const users: Record<string, { id: string; name: string }> = {};
+  for (const u of demoUsers) {
+    const existing = await db.user.findUnique({ where: { email: u.email } });
+    if (existing) {
+      users[u.email] = existing;
+      continue;
+    }
+    const password = process.env.SEED_PASSWORD ?? randomBytes(12).toString("base64url") + "!aA1";
+    const created = await db.user.create({
+      data: { email: u.email, name: u.name, role: u.role, passwordHash: await bcrypt.hash(password, 12) },
+    });
+    users[u.email] = created;
+    credentialLines.push(`${u.email} (${u.role}): ${password}`);
+  }
+  if (credentialLines.length > 0) {
+    fs.appendFileSync(".dev-credentials.local", credentialLines.join("\n") + "\n", { mode: 0o600 });
+    console.log("New development user passwords written to .dev-credentials.local (gitignored).");
+  }
+  const superAdmin = users["admin@director.ltd"];
+  const salesUser = users["sales@director.ltd"];
 
   console.log(`Generating ${COMPANY_COUNT} companies...`);
   let created = 0;
@@ -164,6 +178,7 @@ async function main() {
         confirmationNextDue: status === "active" ? faker.date.soon({ days: 365 }) : null,
         confirmationOverdue,
         hasDS01,
+        ds01FiledAt: hasDS01 ? new Date() : null,
         directorCount,
         singleDirector: directorCount === 1,
         source: "seed",
@@ -176,7 +191,7 @@ async function main() {
   }
 
   console.log("Generating directors...");
-  const companies = await db.company.findMany({ select: { id: true, directorCount: true } });
+  const companies = await db.company.findMany({ where: { source: "seed" }, select: { id: true, directorCount: true } });
   for (let i = 0; i < companies.length; i += BATCH_SIZE) {
     const slice = companies.slice(i, i + BATCH_SIZE);
     const directorBatch = slice.flatMap((company) =>
@@ -187,15 +202,13 @@ async function main() {
         appointedOn: randomPastDate(0, 10),
         nationality: faker.helpers.arrayElement(["British", "Irish", "French", "Polish", "Indian"]),
         occupation: faker.person.jobTitle(),
-        email: faker.datatype.boolean(0.2) ? faker.internet.email() : null,
-        phone: faker.datatype.boolean(0.15) ? faker.phone.number() : null,
       }))
     );
     await db.director.createMany({ data: directorBatch });
   }
 
   console.log("Seeding sample CRM activity for demo user...");
-  const sampleCompanies = await db.company.findMany({ take: 25, orderBy: { createdAt: "asc" } });
+  const sampleCompanies = await db.company.findMany({ where: { source: "seed" }, take: 25, orderBy: { createdAt: "asc" } });
   for (const [idx, company] of sampleCompanies.entries()) {
     const followed = idx % 3 !== 0;
     const trashed = idx % 7 === 0;
@@ -224,6 +237,7 @@ async function main() {
   }
 
   console.log("Seeding a sample saved report...");
+  await db.report.deleteMany({ where: { ownerId: salesUser.id, name: "Dormant companies with DS01 filed" } });
   await db.report.create({
     data: {
       ownerId: salesUser.id,
@@ -239,7 +253,7 @@ async function main() {
         ],
       }),
       dailyRefresh: true,
-      resultCount: await db.company.count({ where: { dormant: true, hasDS01: true } }),
+      resultCount: await db.company.count({ where: { source: "seed", dormant: true, hasDS01: true } }),
       lastRunAt: new Date(),
     },
   });

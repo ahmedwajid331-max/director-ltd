@@ -8,12 +8,20 @@
     "start": "next start",
     "lint": "eslint",
     "db:generate": "prisma generate",
-    "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
     "ch:bulk-ingest": "tsx scripts/ch-bulk-ingest.ts",
     "ch:stream": "tsx scripts/ch-stream.ts",
-    "ch:daily-update": "tsx scripts/ch-daily-update.ts"
+    "ch:daily-update": "tsx scripts/ch-daily-update.ts",
+    "db:dev": "tsx scripts/dev-db.ts",
+    "db:migrate": "prisma migrate deploy",
+    "db:migrate:dev": "prisma migrate dev",
+    "user:set-password": "tsx scripts/set-password.ts",
+    "ch:scheduler": "tsx scripts/scheduler.ts",
+    "jobs:scheduler": "tsx scripts/scheduler.ts",
+    "test": "tsx --test tests/unit/*.test.ts",
+    "test:integration": "tsx scripts/test-integration.ts",
+    "typecheck": "tsc --noEmit"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -30,6 +38,7 @@
     "next": "16.3.6",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "yauzl": "^3.4.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -39,6 +48,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/yauzl": "^3.4.0",
     "embedded-postgres": "^17.5.0-beta.15",
     "eslint": "^9",
     "eslint-config-next": "16.3.6",

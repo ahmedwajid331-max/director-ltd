@@ -1,14 +1,18 @@
+import { NextResponse } from "next/server";
 import { z } from "zod";
+import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
-import { compileFilterToWhere } from "@/lib/filters/compile";
-import { iterateCompanies } from "@/lib/data/companies";
-import { formatDate, formatAddress, STATUS_LABELS, typeLabel } from "@/lib/data/format";
-import type { CompanyStatus } from "@/lib/types";
-import type { Prisma } from "@prisma/client";
+import { buildCompanyWhere, iterateCompanies } from "@/lib/data/companies";
+import { csvLine } from "@/lib/data/csv";
+import { formatDateOnly, formatAddress, STATUS_LABELS, typeLabel } from "@/lib/data/format";
+import { parseFilter } from "@/lib/filters/validate";
+import { countActiveRules } from "@/lib/filters/types";
+import type { CompanyStatus, UserRole } from "@/lib/types";
 
 const bodySchema = z.object({
-  filter: z.any().optional(),
-  q: z.string().optional(),
+  filter: z.unknown().optional(),
+  q: z.string().max(200).optional(),
+  scope: z.enum(["all", "followed", "trashed"]).optional(),
 });
 
 const CSV_HEADERS = [
@@ -26,59 +30,100 @@ const CSV_HEADERS = [
   "DS01 filed",
 ];
 
-function csvEscape(value: string): string {
-  if (/[",\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
-  return value;
+// Export boundary. Anyone signed in can export the results of a filter they
+// can already see on screen, but:
+//  - a plain USER must narrow the register first (a filter or search term) -
+//    "export everything" is not available to them;
+//  - every role has a row cap (env-configurable), so one request cannot walk
+//    off with the whole register or exhaust the server;
+//  - every export is written to the activity log.
+function exportCap(role: UserRole): number {
+  const pick = (name: string, fallback: number) => {
+    const n = Number(process.env[name]);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  if (role === "SUPER_ADMIN") return pick("EXPORT_MAX_ROWS_SUPER", 1_000_000);
+  if (role === "ADMIN") return pick("EXPORT_MAX_ROWS_ADMIN", 250_000);
+  return pick("EXPORT_MAX_ROWS_USER", 50_000);
 }
 
 export async function POST(request: Request) {
   const session = await getSession();
-  if (!session) return new Response("Unauthorized", { status: 401 });
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const parsed = bodySchema.safeParse(await request.json().catch(() => ({})));
-  if (!parsed.success) return new Response("Invalid request", { status: 400 });
+  if (!parsed.success) return NextResponse.json({ error: "Invalid request" }, { status: 400 });
 
-  let where: Prisma.CompanyWhereInput = compileFilterToWhere(parsed.data.filter ?? null);
-  if (parsed.data.q?.trim()) {
-    const term = parsed.data.q.trim();
-    where = {
-      AND: [
-        where,
-        { OR: [{ name: { contains: term } }, { companyNumber: { contains: term } }] },
-      ],
-    };
+  const parsedFilter = parseFilter(parsed.data.filter ?? null);
+  if (!parsedFilter.ok) {
+    return NextResponse.json({ error: "Invalid filter.", details: parsedFilter.errors.slice(0, 10) }, { status: 400 });
   }
+
+  const activeRules = parsedFilter.filter ? countActiveRules(parsedFilter.filter) : 0;
+  const hasSearch = !!parsed.data.q?.trim();
+  if (session.role === "USER" && activeRules === 0 && !hasSearch && !parsed.data.scope) {
+    return NextResponse.json(
+      { error: "Add at least one filter or a search term before exporting - exporting the entire register is not available." },
+      { status: 403 }
+    );
+  }
+
+  const where = buildCompanyWhere({
+    filter: parsed.data.filter,
+    q: parsed.data.q,
+    scope: parsed.data.scope ?? "none",
+    userId: session.userId,
+  });
+
+  const cap = exportCap(session.role);
+  const total = await db.company.count({ where });
+  if (total > cap) {
+    return NextResponse.json(
+      { error: `This export has ${total.toLocaleString()} rows; your limit is ${cap.toLocaleString()}. Narrow the filter and try again.` },
+      { status: 413 }
+    );
+  }
+
+  await db.activityLog.create({
+    data: {
+      userId: session.userId,
+      action: "export_csv",
+      meta: JSON.stringify({ rows: total, activeRules, q: parsed.data.q?.slice(0, 80) ?? null }),
+    },
+  });
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
-      controller.enqueue(encoder.encode(CSV_HEADERS.join(",") + "\n"));
-      // Streamed in fixed-size batches so exports stay memory-safe no matter
-      // how large the matching result set is.
-      for await (const batch of iterateCompanies(where, 500)) {
-        const lines = batch
-          .map((c) =>
-            [
-              c.companyNumber,
-              c.name,
-              STATUS_LABELS[c.status as CompanyStatus],
-              typeLabel(c.type),
-              formatDate(c.incorporationDate),
-              c.dormant ? "Yes" : "No",
-              formatAddress(c),
-              String(c.directorCount),
-              c.singleDirector ? "Yes" : "No",
-              c.accountsOverdue ? "Yes" : "No",
-              c.confirmationOverdue ? "Yes" : "No",
-              c.hasDS01 ? "Yes" : "No",
-            ]
-              .map(csvEscape)
-              .join(",")
-          )
-          .join("\n");
-        controller.enqueue(encoder.encode(lines + "\n"));
+      try {
+        controller.enqueue(encoder.encode(csvLine(CSV_HEADERS) + "\r\n"));
+        // Streamed in fixed-size batches so exports stay memory-safe no matter
+        // how large the matching result set is.
+        for await (const batch of iterateCompanies(where, 500)) {
+          const lines = batch
+            .map((c) =>
+              csvLine([
+                c.companyNumber,
+                c.name,
+                STATUS_LABELS[c.status as CompanyStatus] ?? c.status,
+                typeLabel(c.type),
+                formatDateOnly(c.incorporationDate),
+                c.dormant ? "Yes" : "No",
+                formatAddress(c),
+                c.directorCount,
+                c.singleDirector ? "Yes" : "No",
+                c.accountsOverdue ? "Yes" : "No",
+                c.confirmationOverdue ? "Yes" : "No",
+                c.hasDS01 ? "Yes" : "No",
+              ])
+            )
+            .join("\r\n");
+          controller.enqueue(encoder.encode(lines + "\r\n"));
+        }
+        controller.close();
+      } catch (err) {
+        controller.error(err);
       }
-      controller.close();
     },
   });
 
@@ -86,6 +131,7 @@ export async function POST(request: Request) {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="director-ltd-export-${Date.now()}.csv"`,
+      "Cache-Control": "no-store",
     },
   });
 }

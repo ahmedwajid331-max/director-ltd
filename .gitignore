@@ -50,3 +50,6 @@ next-env.d.ts
 /.dev-credentials.local
 /tmp-ingest/
 /*.local
+.env.pre-fix.bak.local
+/.pgdata-test/
+/.pgdata/

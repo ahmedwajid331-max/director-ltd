@@ -72,10 +72,6 @@ export function LoginForm() {
         {loading && <Loader2 className="h-4 w-4 animate-spin" />}
         Sign in
       </Button>
-      <div className="rounded-lg bg-slate-50 px-3 py-2.5 text-xs text-slate-500">
-        Demo credentials — Super Admin: <span className="font-mono">admin@director.ltd</span> /{" "}
-        <span className="font-mono">DirectorAdmin123!</span>
-      </div>
     </form>
   );
 }

@@ -11,6 +11,15 @@ const SCOPES = [
 
 const DEDICATED_CALENDAR_NAME = "DIRECTOR.LTD Follow-ups";
 
+// Follow-ups are date-only, so they are sent to Google as ALL-DAY events
+// (start.date / end.date, end exclusive) - never as a timed event at
+// midnight UTC, which would show at 01:00 in summer for a UK user.
+function allDayTimes(startAt: Date) {
+  const day = (d: Date) => d.toISOString().slice(0, 10);
+  const next = new Date(startAt.getTime() + 24 * 60 * 60 * 1000);
+  return { start: { date: day(startAt) }, end: { date: day(next) } };
+}
+
 function getOAuthClient() {
   const clientId = process.env.GOOGLE_CALENDAR_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CALENDAR_CLIENT_SECRET;
@@ -113,16 +122,12 @@ export const googleCalendarProvider: CalendarProvider = {
   async createEvent(connection, input: CalendarEventInput): Promise<string> {
     const client = await authorizedClient(connection);
     const calendarApi = google.calendar({ auth: client, version: "v3" });
-    const duration = input.durationMinutes ?? 30;
-    const end = new Date(input.startAt.getTime() + duration * 60000);
-
     const { data } = await calendarApi.events.insert({
       calendarId: connection.calendarId ?? "primary",
       requestBody: {
         summary: input.title,
         description: input.description,
-        start: { dateTime: input.startAt.toISOString() },
-        end: { dateTime: end.toISOString() },
+        ...allDayTimes(input.startAt),
       },
     });
     if (!data.id) throw new Error("Google Calendar did not return an event id");
@@ -132,17 +137,13 @@ export const googleCalendarProvider: CalendarProvider = {
   async updateEvent(connection, externalEventId, input: CalendarEventInput) {
     const client = await authorizedClient(connection);
     const calendarApi = google.calendar({ auth: client, version: "v3" });
-    const duration = input.durationMinutes ?? 30;
-    const end = new Date(input.startAt.getTime() + duration * 60000);
-
     await calendarApi.events.patch({
       calendarId: connection.calendarId ?? "primary",
       eventId: externalEventId,
       requestBody: {
         summary: input.title,
         description: input.description,
-        start: { dateTime: input.startAt.toISOString() },
-        end: { dateTime: end.toISOString() },
+        ...allDayTimes(input.startAt),
       },
     });
   },

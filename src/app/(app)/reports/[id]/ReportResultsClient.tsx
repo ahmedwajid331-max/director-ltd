@@ -73,6 +73,11 @@ export function ReportResultsClient({ reportId, filter }: { reportId: string; fi
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filter }),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        window.alert(data.error ?? "Export failed.");
+        return;
+      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -94,11 +99,11 @@ export function ReportResultsClient({ reportId, filter }: { reportId: string; fi
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap justify-end gap-2 print:hidden">
-        <Button variant="outline" size="sm" onClick={handleShare}>
+        <Button variant="outline" size="sm" onClick={handleShare} title="Copies this report's link. It opens only for signed-in users who are allowed to see this report (its owner and admins).">
           {copied ? <Check className="h-4 w-4" /> : <Share2 className="h-4 w-4" />}
           {copied ? "Link copied" : "Share"}
         </Button>
-        <Button variant="outline" size="sm" onClick={() => window.print()}>
+        <Button variant="outline" size="sm" onClick={() => window.print()} title="Prints the rows currently on screen (this page of results). Use Export CSV for the whole report.">
           <Printer className="h-4 w-4" /> Print
         </Button>
         <Button variant="outline" size="sm" onClick={handleExport} disabled={exporting}>

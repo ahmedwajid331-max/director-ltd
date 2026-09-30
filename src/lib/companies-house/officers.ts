@@ -1,4 +1,5 @@
 import { chRestGetWithRateInfo } from "./client";
+import { parseChDate } from "./csv/dates";
 
 export interface CompaniesHouseOfficer {
   name: string;
@@ -14,10 +15,55 @@ interface OfficerListResponse {
   items: CompaniesHouseOfficer[];
   active_count?: number;
   total_results?: number;
+  items_per_page?: number;
+}
+
+// ---------------------------------------------------------------------------
+// What counts as a "director" (the definition behind directorCount and the
+// "single director" filter). Explicit, not "every officer":
+//
+//   COUNTED (an active appointment whose role is one of these):
+//     director, corporate-director, nominee-director, corporate-nominee-director
+//       -> a company's directors, natural or corporate, including nominees
+//     llp-member, llp-designated-member, corporate-llp-member,
+//     corporate-llp-designated-member
+//       -> an LLP has members rather than directors; they fill the same
+//          role, so an LLP's member count is its directorCount
+//
+//   NOT COUNTED: secretary, corporate-secretary, nominee-secretary,
+//     corporate-nominee-secretary, judicial-factor, receiver-and-manager,
+//     manager-of-a-charitable-incorporated-organisation, and any role not
+//     listed above (they are stored and displayed, never counted).
+//
+//   "Active" = no resigned_on date.
+//
+// Changing this list changes filter results, so it is the single source of
+// truth and is unit-tested.
+// ---------------------------------------------------------------------------
+export const DIRECTOR_ROLES = new Set([
+  "director",
+  "corporate-director",
+  "nominee-director",
+  "corporate-nominee-director",
+]);
+export const LLP_MEMBER_ROLES = new Set([
+  "llp-member",
+  "llp-designated-member",
+  "corporate-llp-member",
+  "corporate-llp-designated-member",
+]);
+
+export function countsAsDirector(officer: Pick<CompaniesHouseOfficer, "officer_role" | "resigned_on">): boolean {
+  if (officer.resigned_on) return false;
+  return DIRECTOR_ROLES.has(officer.officer_role) || LLP_MEMBER_ROLES.has(officer.officer_role);
+}
+
+export function countActiveDirectors(officers: CompaniesHouseOfficer[]): number {
+  return officers.filter(countsAsDirector).length;
 }
 
 // The officer's stable Companies House id is only exposed embedded in the
-// appointments link, e.g. /officers/AbC123.../appointments — not as a
+// appointments link, e.g. /officers/AbC123.../appointments - not as a
 // flat field on the list item.
 function extractOfficerId(officer: CompaniesHouseOfficer): string | null {
   const href = officer.links?.officer?.appointments;
@@ -25,11 +71,26 @@ function extractOfficerId(officer: CompaniesHouseOfficer): string | null {
   return match ? match[1] : null;
 }
 
+const PAGE_SIZE = 100; // the API maximum
+const MAX_PAGES = 100; // 10,000 officers: a safety stop, never hit by a real company
+
+// Reads EVERY page of a company's officers (the API defaults to 35 per page
+// and a large company - e.g. Tesco PLC, 74 officers - spans several).
 export async function fetchCompanyOfficers(companyNumber: string): Promise<CompaniesHouseOfficer[]> {
-  const res = await chRestGetWithRateInfo<OfficerListResponse>(
-    `/company/${encodeURIComponent(companyNumber)}/officers`
-  );
-  return res.items ?? [];
+  const all: CompaniesHouseOfficer[] = [];
+  let startIndex = 0;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const res = await chRestGetWithRateInfo<OfficerListResponse>(
+      `/company/${encodeURIComponent(companyNumber)}/officers`,
+      { params: { items_per_page: PAGE_SIZE, start_index: startIndex } }
+    );
+    const items = res.items ?? [];
+    all.push(...items);
+    startIndex += items.length;
+    const total = res.total_results ?? all.length;
+    if (items.length === 0 || all.length >= total) break;
+  }
+  return all;
 }
 
 export function mapOfficerToDirectorUpsert(officer: CompaniesHouseOfficer) {
@@ -37,17 +98,10 @@ export function mapOfficerToDirectorUpsert(officer: CompaniesHouseOfficer) {
     officerId: extractOfficerId(officer),
     name: officer.name,
     role: officer.officer_role,
-    appointedOn: officer.appointed_on ? new Date(officer.appointed_on) : null,
-    resignedOn: officer.resigned_on ? new Date(officer.resigned_on) : null,
+    appointedOn: officer.appointed_on ? parseChDate(officer.appointed_on) : null,
+    resignedOn: officer.resigned_on ? parseChDate(officer.resigned_on) : null,
     nationality: officer.nationality ?? null,
     occupation: officer.occupation ?? null,
     source: "rest" as const,
   };
-}
-
-// directorCount/singleDirector only count officers still in post (no
-// resigned_on) with an officer_role of "director" — matches how Companies
-// House itself defines an active directorship.
-export function countActiveDirectors(officers: CompaniesHouseOfficer[]): number {
-  return officers.filter((o) => o.officer_role === "director" && !o.resigned_on).length;
 }

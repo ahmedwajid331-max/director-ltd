@@ -6,15 +6,9 @@ import { requireRole } from "@/lib/auth/guard";
 import { StatCard } from "@/components/ui/StatCard";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate } from "@/lib/data/format";
+import { RUN_KIND_LABELS, RUN_KINDS, loadLatestRuns } from "@/lib/jobs/display";
 import { isRestConfigured, isStreamConfigured } from "@/lib/companies-house/client";
 
-const RUN_KINDS = ["bulk_csv", "stream_backfill", "officer_backfill", "daily_update"] as const;
-const RUN_KIND_LABELS: Record<string, string> = {
-  bulk_csv: "Bulk / search ingestion",
-  stream_backfill: "Filing stream",
-  officer_backfill: "Officer backfill",
-  daily_update: "Daily update",
-};
 
 export const metadata: Metadata = { title: "Super Admin" };
 
@@ -31,6 +25,14 @@ function describeAction(action: string, meta: string | null): string {
       return `${data.trashed ? "Sent to trash" : "Restored"} ${data.companyName}`;
     case "director_contact_added":
       return `Added contact "${data.name}"`;
+    case "search":
+      return `Searched${data.q ? ` "${data.q}"` : ""}${data.activeRules ? ` with ${data.activeRules} filter${data.activeRules > 1 ? "s" : ""}` : ""} (${data.total} results)`;
+    case "export_csv":
+      return `Exported ${data.rows ?? "?"} companies to CSV`;
+    case "user_created":
+      return `Created a ${String(data.role ?? "USER").replace("_", " ").toLowerCase()} account`;
+    case "user_updated":
+      return "Changed a user account";
     default:
       return action;
   }
@@ -65,7 +67,7 @@ export default async function SuperAdminPage() {
       include: { user: { select: { name: true } } },
     }),
     db.company.groupBy({ by: ["source"], _count: { _all: true } }),
-    Promise.all(RUN_KINDS.map((kind) => db.ingestionRun.findFirst({ where: { kind }, orderBy: { startedAt: "desc" } }))),
+    loadLatestRuns(),
     db.calendarConnection.findMany({ where: { provider: { not: "INTERNAL" } } }),
   ]);
 
@@ -80,7 +82,7 @@ export default async function SuperAdminPage() {
           <ShieldCheck className="h-3.5 w-3.5" /> Super Admin
         </p>
         <h2 className="text-lg font-semibold text-slate-900">System-wide oversight</h2>
-        <p className="text-sm text-slate-500">Every user&apos;s searches, reports and activity, in one place.</p>
+        <p className="text-sm text-slate-500">Every user&apos;s searches, reports, exports and CRM activity, in one place.</p>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -109,7 +111,7 @@ export default async function SuperAdminPage() {
               </Badge>
             </div>
             <div className="flex items-center justify-between text-sm">
-              <span className="text-slate-600">Real (non-seed) companies</span>
+              <span className="text-slate-600">Real Companies House companies</span>
               <span className="font-medium text-slate-900">{realCompanies.toLocaleString()}</span>
             </div>
             <div className="flex items-center justify-between text-sm">
@@ -121,25 +123,14 @@ export default async function SuperAdminPage() {
             </div>
           </div>
           <div className="space-y-1.5">
-            {latestRuns.map((run, i) => (
+            {latestRuns.map((v, i) => (
               <div key={RUN_KINDS[i]} className="flex items-center justify-between text-sm">
                 <span className="text-slate-600">{RUN_KIND_LABELS[RUN_KINDS[i]]}</span>
-                {run ? (
+                {v.run ? (
                   <span className="flex items-center gap-2">
-                    <Badge
-                      tone={
-                        run.status === "success"
-                          ? "green"
-                          : run.status === "running"
-                            ? "blue"
-                            : run.status === "partial"
-                              ? "amber"
-                              : "red"
-                      }
-                    >
-                      {run.status}
-                    </Badge>
-                    <span className="text-xs text-slate-400">{formatDate(run.finishedAt ?? run.startedAt)}</span>
+                    <Badge tone={v.tone}>{v.status}</Badge>
+                    {v.detail && <span className="text-xs text-slate-400">{v.detail}</span>}
+                    <span className="text-xs text-slate-400">{formatDate(v.run.finishedAt ?? v.run.startedAt)}</span>
                   </span>
                 ) : (
                   <span className="text-xs text-slate-400">Never run</span>

@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
-import { compileFilterToWhere } from "@/lib/filters/compile";
-import { searchCompanies, isSortableField } from "@/lib/data/companies";
+import { buildCompanyWhere, searchCompanies, isSortableField } from "@/lib/data/companies";
+import { filterErrorResponse } from "@/lib/api/filter-errors";
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getSession();
@@ -20,7 +20,14 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   const sortDir = searchParams.get("sortDir") === "desc" ? "desc" : "asc";
 
   const filter = JSON.parse(report.filterJson);
-  const where = compileFilterToWhere(filter);
+  let where;
+  try {
+    where = buildCompanyWhere({ filter });
+  } catch (err) {
+    const res = filterErrorResponse(err);
+    if (res) return res;
+    throw err;
+  }
 
   const result = await searchCompanies({
     where,

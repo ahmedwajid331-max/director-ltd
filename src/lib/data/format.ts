@@ -19,10 +19,16 @@ export function formatDateOnly(date: Date | string | null | undefined): string {
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
 }
 
-export function companyAgeYears(incorporationDate: Date | string): number {
-  const d = typeof incorporationDate === "string" ? new Date(incorporationDate) : incorporationDate;
-  const diffMs = Date.now() - d.getTime();
-  return Math.floor(diffMs / (365.25 * 24 * 60 * 60 * 1000));
+// Whole years elapsed between two calendar dates (UTC, no time-of-day): a
+// company incorporated on 2016-09-30 turns 10 on 2026-09-30 exactly.
+export function companyAgeYears(incorporationDate: Date | string, now: Date = new Date()): number {
+  const inc = typeof incorporationDate === "string" ? new Date(incorporationDate) : incorporationDate;
+  let years = now.getUTCFullYear() - inc.getUTCFullYear();
+  const beforeAnniversary =
+    now.getUTCMonth() < inc.getUTCMonth() ||
+    (now.getUTCMonth() === inc.getUTCMonth() && now.getUTCDate() < inc.getUTCDate());
+  if (beforeAnniversary) years--;
+  return Math.max(0, years);
 }
 
 // Matches the real Companies House company_status enum (see

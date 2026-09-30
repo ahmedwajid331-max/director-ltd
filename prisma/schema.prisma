@@ -1,22 +1,21 @@
-// DIRECTOR.LTD data layer.
-//
-// Dev/local runs against SQLite (zero external setup). Swap the datasource
-// to postgresql + DATABASE_URL when the real Companies House pipeline and
-// production infrastructure are ready — the schema itself is portable.
+// DIRECTOR.LTD data layer — PostgreSQL only (dev: `npm run db:dev` starts a
+// disposable local cluster; production: any PostgreSQL 14+ / AWS RDS).
+// Schema changes go through `prisma migrate` (see prisma/migrations).
+// Date-only facts (incorporation, due dates, follow-ups) are real SQL DATE
+// columns so there is no timezone or time-of-day ambiguity.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-// SQLite has no native enum support in Prisma, so role/status/type are
-// plain strings constrained by the TS union types in src/lib/types.ts.
-// Swapping the datasource to Postgres later can promote these to real
-// Prisma enums without changing application code.
+// role/status/type are plain strings constrained by the TS union types in
+// src/lib/types.ts (Companies House adds new values over time; a native enum
+// would make every new CH value a migration).
 
 model User {
   id           String    @id @default(cuid())
@@ -33,6 +32,18 @@ model User {
   activity            ActivityLog[]
   followUps           FollowUp[]
   calendarConnections CalendarConnection[]
+  crmContacts         CrmContact[]
+}
+
+// Login throttling state, stored in the database so it is shared across
+// every app instance (a per-process counter would be bypassed by a second
+// container). One row per failed attempt; old rows are pruned on login.
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  key       String // "ip:<addr>" or "acct:<email>|<addr>"
+  createdAt DateTime @default(now())
+
+  @@index([key, createdAt])
 }
 
 model Company {
@@ -41,8 +52,8 @@ model Company {
   name          String
   status        String
   type          String
-  incorporationDate DateTime
-  dissolutionDate   DateTime?
+  incorporationDate DateTime  @db.Date
+  dissolutionDate   DateTime? @db.Date
   dormant           Boolean   @default(false)
   sicCodes          String    @default("")
 
@@ -52,13 +63,20 @@ model Company {
   registeredPostcode String
   registeredCounty   String?
 
-  accountsNextDue     DateTime?
-  accountsLastMadeUp  DateTime?
+  accountsNextDue     DateTime? @db.Date
+  accountsLastMadeUp  DateTime? @db.Date
   accountsOverdue     Boolean   @default(false)
-  confirmationNextDue DateTime?
+  confirmationNextDue DateTime? @db.Date
+  confirmationLastMadeUp DateTime? @db.Date
   confirmationOverdue Boolean   @default(false)
 
-  hasDS01        Boolean @default(false)
+  // DS01 = application to strike the company off. hasDS01 is true when a DS01
+  // filing event has been seen on the stream (ds01FiledAt) OR the register
+  // shows "Active - Proposal to Strike off". A later DS02 (withdrawal)
+  // clears ds01FiledAt. ds01FiledAt is event-derived, so a monthly CSV
+  // re-import can never erase it.
+  hasDS01        Boolean   @default(false)
+  ds01FiledAt    DateTime? @db.Date
   directorCount  Int     @default(0)
   singleDirector Boolean @default(false)
 
@@ -66,7 +84,7 @@ model Company {
   // granular company_status_detail value (e.g. active-proposal-to-strike-off)
   // that only the full REST profile exposes. "accountType" is the raw
   // accounts.last_accounts.type value dormant is derived from. "source"
-  // tracks provenance (seed | bulk_import | stream | rest_enrichment) so
+  // tracks provenance (seed | bulk_import | advanced_search | stream | rest_enrichment) so
   // synthetic dev rows are never confused with real ingested data.
   statusDetail       String?
   accountType        String?
@@ -79,22 +97,18 @@ model Company {
   updatedAt DateTime @updatedAt
 
   directors    Director[]
+  crmContacts  CrmContact[]
   userStates   UserCompanyState[]
   filingEvents FilingEvent[]
 
   @@index([status])
   @@index([type])
-  @@index([dormant])
   @@index([registeredPostcode])
   @@index([incorporationDate])
-  @@index([accountsOverdue])
-  @@index([confirmationOverdue])
-  @@index([hasDS01])
-  @@index([singleDirector])
   @@index([directorCount])
-  @@index([name])
   @@index([source])
-  @@index([officersCoverage])
+  // Low-cardinality booleans use partial indexes + trigram (name) created in
+  // the migration SQL (Prisma cannot express them).
 }
 
 model Director {
@@ -102,19 +116,17 @@ model Director {
   companyId   String
   company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
   name        String
-  role        String    @default("director")
-  appointedOn DateTime?
-  resignedOn  DateTime?
+  role        String    @default("director") // raw CH officer_role
+  appointedOn DateTime? @db.Date
+  resignedOn  DateTime? @db.Date
   nationality String?
   occupation  String?
-  email       String?
-  phone       String?
-  manuallyAdded Boolean @default(false)
 
-  // officerId is Companies House's own appointment id, used as the stable
-  // upsert key for real officer rows (never set for manuallyAdded contacts).
+  // officerId is Companies House's own id from the appointments link. Only
+  // Companies House officers live in this table - user-entered CRM contacts
+  // are CrmContact rows and never count towards directorCount.
   officerId String?
-  source    String  @default("seed") // seed | rest | stream
+  source    String  @default("seed") // seed | rest
 
   createdAt   DateTime @default(now())
 
@@ -122,10 +134,28 @@ model Director {
   @@index([officerId])
 }
 
+// A contact a user typed in by hand (e.g. the person they actually spoke to).
+// Private to that user, completely separate from Companies House officers:
+// it never changes directorCount/singleDirector.
+model CrmContact {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name       String
+  role       String   @default("contact")
+  email      String?
+  phone      String?
+  occupation String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId, companyId])
+}
+
 // One raw event from the Companies House filing stream. transactionId is
 // unique so re-processing the same stream position (restart, overlap) never
-// creates duplicates. This is the audit trail behind hasDS01 and the source
-// of truth the daily update / backfill jobs read from.
+// creates duplicates. This is the audit trail behind hasDS01.
 model FilingEvent {
   id            String   @id @default(cuid())
   companyId     String?
@@ -136,26 +166,56 @@ model FilingEvent {
   date          String?
   description   String?
   resourceUri   String?
+  timepoint     BigInt?
   processedAt   DateTime @default(now())
+
+  // pending = persisted but its effect on Company not yet applied (e.g.
+  // Companies House was rate limited); applied = effect committed; ignored =
+  // stored for audit only. Pending events are retried, never dropped.
+  applyStatus String    @default("pending")
+  appliedAt   DateTime?
+  lastError   String?
 
   @@index([companyNumber])
   @@index([type])
+  @@index([applyStatus, type])
 }
 
-// One run of a bulk ingest / stream backfill / officer backfill / daily
-// update job. Gives Settings and Super Admin real "last successful run" /
-// "last failure" data instead of a hardcoded claim, and "checkpoint" lets an
-// interrupted bulk ingest resume instead of restarting from scratch.
+// Latest stream position that was fully persisted. On reconnect the worker
+// resumes from here (?timepoint=N) so a dropped connection or restart does
+// not silently lose events.
+model StreamCheckpoint {
+  name        String    @id // "filings"
+  timepoint   BigInt
+  lastEventAt DateTime?
+  updatedAt   DateTime  @updatedAt
+}
+
+// One run of an ingestion / stream / update job. Gives Settings and Super
+// Admin real "last successful run" / "last failure" data. heartbeatAt is
+// refreshed while a job is alive; a "running" row whose heartbeat is stale is
+// a dead job and is reconciled to "failed" (see src/lib/jobs/runs.ts).
+// checkpoint + inputFingerprint make an interrupted bulk_csv run resumable
+// against the exact same input file.
 model IngestionRun {
-  id           String    @id @default(cuid())
-  kind         String // bulk_csv | stream_backfill | officer_backfill | daily_update
-  status       String    @default("running") // running | success | failed | partial
-  startedAt    DateTime  @default(now())
-  finishedAt   DateTime?
-  rowsProcessed Int      @default(0)
-  rowsFailed    Int      @default(0)
-  checkpoint    String?
-  errorMessage  String?
+  id               String    @id @default(cuid())
+  kind             String // advanced_search | bulk_csv | stream | officer_backfill | daily_update
+  status           String    @default("running") // running | success | partial | failed
+  startedAt        DateTime  @default(now())
+  heartbeatAt      DateTime  @default(now())
+  finishedAt       DateTime?
+  inputName        String?
+  inputFingerprint String?
+  rowsRead         Int       @default(0)
+  rowsInserted     Int       @default(0)
+  rowsUpdated      Int       @default(0)
+  rowsSkipped      Int       @default(0)
+  rowsFailed       Int       @default(0)
+  rowsProcessed    Int       @default(0) // inserted + updated (kept for dashboards)
+  checkpoint       String?
+  errorMessage     String?
+  errorSamples     String? // JSON: first N row-level errors
+  statsJson        String? // JSON: unknown categories, warnings, etc.
 
   @@index([kind, startedAt])
   @@index([status])
@@ -197,7 +257,7 @@ model FollowUp {
   userCompanyState   UserCompanyState @relation(fields: [userCompanyStateId], references: [id], onDelete: Cascade)
   userId             String
   user               User             @relation(fields: [userId], references: [id])
-  dueDate            DateTime
+  dueDate            DateTime         @db.Date
   note               String?
   done               Boolean          @default(false)
   createdAt          DateTime         @default(now())
@@ -277,4 +337,5 @@ model ActivityLog {
 
   @@index([userId, createdAt])
   @@index([action])
+  @@index([createdAt])
 }

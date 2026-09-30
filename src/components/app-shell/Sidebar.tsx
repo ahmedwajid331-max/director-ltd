@@ -8,7 +8,7 @@ import { cn } from "@/lib/cn";
 
 const ROLE_RANK: Record<UserRole, number> = { USER: 0, ADMIN: 1, SUPER_ADMIN: 2 };
 
-export function Sidebar({ role, hasRealData }: { role: UserRole; hasRealData: boolean }) {
+export function Sidebar({ role, realCompanyCount }: { role: UserRole; realCompanyCount: number }) {
   const pathname = usePathname();
   const activeHref = findActiveNavItem(pathname)?.href;
 
@@ -52,7 +52,7 @@ export function Sidebar({ role, hasRealData }: { role: UserRole; hasRealData: bo
         <div className="rounded-lg bg-slate-50 px-3 py-2.5 text-xs text-slate-500">
           Companies House data:{" "}
           <span className="font-medium text-slate-700">
-            {hasRealData ? "live data connected" : "development seed data"}
+            {realCompanyCount > 0 ? `${realCompanyCount.toLocaleString()} real companies loaded` : "no real data loaded yet"}
           </span>
         </div>
       </div>

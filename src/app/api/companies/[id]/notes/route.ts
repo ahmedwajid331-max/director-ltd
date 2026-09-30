@@ -3,15 +3,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 
-const bodySchema = z.object({ body: z.string().min(1).max(4000) });
-
-async function ensureState(userId: string, companyId: string) {
-  return db.userCompanyState.upsert({
-    where: { userId_companyId: { userId, companyId } },
-    create: { userId, companyId },
-    update: {},
-  });
-}
+const bodySchema = z.object({ body: z.string().trim().min(1).max(4000) });
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getSession();
@@ -21,7 +13,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const parsed = bodySchema.safeParse(await request.json().catch(() => ({})));
   if (!parsed.success) return NextResponse.json({ error: "Note cannot be empty" }, { status: 400 });
 
-  const state = await ensureState(session.userId, id);
+  const company = await db.company.findUnique({ where: { id }, select: { id: true } });
+  if (!company) return NextResponse.json({ error: "Company not found" }, { status: 404 });
+
+  const state = await db.userCompanyState.upsert({
+    where: { userId_companyId: { userId: session.userId, companyId: id } },
+    create: { userId: session.userId, companyId: id },
+    update: {},
+  });
   const note = await db.note.create({
     data: { userCompanyStateId: state.id, body: parsed.data.body, authorName: session.name },
   });

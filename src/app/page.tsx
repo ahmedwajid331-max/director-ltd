@@ -12,6 +12,8 @@ import { LinkButton } from "@/components/ui/Button";
 import { MarketingHeader } from "@/components/marketing/Header";
 import { MarketingFooter } from "@/components/marketing/Footer";
 import { db } from "@/lib/db";
+import { REAL_COMPANIES_WHERE } from "@/lib/data/scope";
+import { REGISTER_SIZE_ESTIMATE } from "@/lib/jobs/display";
 
 // Without this, Next statically prerenders the landing page at build time
 // and bakes in whatever the company count was then — silently defeating
@@ -23,7 +25,7 @@ const CAPABILITIES = [
     icon: Search,
     title: "Full Companies House search",
     description:
-      "Every active and dissolved UK company, fully indexed — search by name, number, officer, SIC code or address.",
+      "Search Companies House company data by name, company number, postcode, SIC code or address. Coverage grows as the register is loaded — the live figure is shown below.",
   },
   {
     icon: SlidersHorizontal,
@@ -67,17 +69,15 @@ export default async function Home() {
   // Real numbers, not marketing copy — this is the same query Settings
   // uses, so the landing page can never claim more than what's actually
   // ingested. See src/app/(app)/settings for the full breakdown.
-  const [totalCompanies, realCompanies] = await Promise.all([
-    db.company.count(),
-    db.company.count({ where: { source: { not: "seed" } } }),
-  ]);
+  const realCompanies = await db.company.count({ where: REAL_COMPANIES_WHERE });
   const isLive = realCompanies > 0;
+  const pct = (realCompanies / REGISTER_SIZE_ESTIMATE) * 100;
 
   const stats = [
-    { value: totalCompanies.toLocaleString(), label: "Companies indexed" },
-    { value: isLive ? realCompanies.toLocaleString() : "0", label: "From live Companies House data" },
-    { value: "Daily", label: "Report refresh cycle" },
-    { value: "100%", label: "Server-side pagination" },
+    { value: realCompanies.toLocaleString(), label: "Real Companies House companies loaded" },
+    { value: pct === 0 ? "0%" : pct < 0.01 ? "<0.01%" : `${pct < 1 ? pct.toFixed(2) : pct.toFixed(1)}%`, label: "Of the register loaded (approx.)" },
+    { value: "Daily", label: "Scheduled report refresh" },
+    { value: "Stream", label: "Live DS01 filing feed" },
   ];
 
   return (
@@ -90,7 +90,7 @@ export default async function Home() {
           <div className="mx-auto max-w-3xl text-center">
             <div className="mx-auto mb-6 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
               <span className={`h-1.5 w-1.5 rounded-full ${isLive ? "bg-emerald-500" : "bg-amber-500"}`} />
-              {isLive ? "Connected to live Companies House data" : "Running on development data"}
+              {isLive ? `${realCompanies.toLocaleString()} real Companies House companies loaded` : "Running on development data"}
             </div>
             <h1 className="text-4xl font-semibold tracking-tight text-slate-900 sm:text-5xl">
               Search, filter and monitor every UK company —{" "}

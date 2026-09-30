@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
-import { compileFilterToWhere } from "@/lib/filters/compile";
+import { buildCompanyWhere } from "@/lib/data/companies";
+import { filterErrorResponse } from "@/lib/api/filter-errors";
 
 export async function POST(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getSession();
@@ -14,8 +15,14 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
   }
 
   const filter = JSON.parse(report.filterJson);
-  const where = compileFilterToWhere(filter);
-  const resultCount = await db.company.count({ where });
+  let resultCount: number;
+  try {
+    resultCount = await db.company.count({ where: buildCompanyWhere({ filter }) });
+  } catch (err) {
+    const res = filterErrorResponse(err);
+    if (res) return res;
+    throw err;
+  }
 
   const updated = await db.report.update({
     where: { id },
