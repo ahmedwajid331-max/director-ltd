@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 import { effectiveStatus } from "@/lib/jobs/runs";
-import { isStreamConfigured } from "@/lib/companies-house/client";
+import { isRestConfigured, isStreamConfigured } from "@/lib/companies-house/client";
+import { getDataFreshness } from "@/lib/data/freshness";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,13 @@ export async function GET() {
   const lastEventAgeSeconds = checkpoint?.lastEventAt ? Math.round((now - checkpoint.lastEventAt.getTime()) / 1000) : null;
   const stalledJobs = runs.filter((r) => effectiveStatus(r) === "stalled").length;
 
+  // New registrations are synchronised daily-ish; more than 3 days behind means that job is failing or not running.
+  const freshness = await getDataFreshness();
+  const registrationsLagDays = freshness.registrationsThrough ? Math.floor((now - Date.parse(freshness.registrationsThrough + "T00:00:00Z")) / 86_400_000) : null;
+  const registrationsStale = isRestConfigured() && registrationsLagDays !== null && registrationsLagDays > 3;
+
   const degraded =
+    registrationsStale ||
     (streamConfigured && streamStatus !== "running") ||
     (streamConfigured && lastEventAgeSeconds !== null && lastEventAgeSeconds > 15 * 60) ||
     stalledJobs > 0 ||
@@ -42,6 +49,7 @@ export async function GET() {
     body.jobs = {
       stream: { configured: streamConfigured, status: streamStatus, lastEventAgeSeconds, checkpoint: checkpoint ? Number(checkpoint.timepoint) : null },
       stalledJobs,
+      dataFreshness: { lastUpdated: freshness.lastUpdated, registrationsThrough: freshness.registrationsThrough, registrationsLagDays, bulkSnapshot: freshness.bulkSnapshot },
       pendingDs01Events: pendingEvents,
       latestFailed: runs.filter((r) => r.status === "failed").slice(0, 3).map((r) => ({ kind: r.kind, at: r.startedAt, error: r.errorMessage?.slice(0, 200) ?? null })),
     };

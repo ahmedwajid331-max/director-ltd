@@ -8,11 +8,15 @@ const PROTECTED_PREFIXES = [
   "/companies",
   "/reports",
   "/watches",
+  "/saved",
+  "/red-flags",
   "/trash",
   "/calendar",
   "/users",
   "/admin",
   "/settings",
+  "/work",
+  "/timesheets",
 ];
 
 async function isValidSession(token: string | undefined): Promise<boolean> {
@@ -20,8 +24,11 @@ async function isValidSession(token: string | undefined): Promise<boolean> {
   const secret = process.env.AUTH_SECRET;
   if (!secret) return false;
   try {
-    await jwtVerify(token, new TextEncoder().encode(secret));
-    return true;
+    const { payload } = await jwtVerify(token, new TextEncoder().encode(secret));
+    // Cookies issued before session tracking carry no session id. They cannot be tracked or ended by a logout, so they are
+    // treated as signed out (the person signs in once and gets a tracked session). getSession() applies the same rule;
+    // the two must agree or /login and the app would redirect to each other.
+    return typeof payload.sid === "string" && payload.sid.length > 0;
   } catch {
     return false;
   }
@@ -53,11 +60,15 @@ export const config = {
     "/companies/:path*",
     "/reports/:path*",
     "/watches/:path*",
+    "/saved/:path*",
+    "/red-flags/:path*",
     "/trash/:path*",
     "/calendar/:path*",
     "/users/:path*",
     "/admin/:path*",
     "/settings/:path*",
+    "/work/:path*",
+    "/timesheets/:path*",
     "/login",
   ],
 };

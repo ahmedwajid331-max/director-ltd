@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- test helpers return loosely-typed JSON */
+import "../support/require-scratch-db"; // must stay first: integration tests create/delete rows
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { randomUUID } from "node:crypto";

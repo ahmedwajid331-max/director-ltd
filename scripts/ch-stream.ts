@@ -12,7 +12,8 @@ const args = process.argv.slice(2);
 const maxSeconds = args.includes("--max-seconds") ? Number(args[args.indexOf("--max-seconds") + 1]) : undefined;
 
 const controller = new AbortController();
-for (const sig of ["SIGINT", "SIGTERM"] as const) {
+// SIGHUP / SIGBREAK: closing the terminal window (Windows sends these) must end the run cleanly, not leave it unfinished.
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"] as const) {
   process.on(sig, () => {
     console.log(`\n${sig} received - stopping stream worker...`);
     controller.abort();

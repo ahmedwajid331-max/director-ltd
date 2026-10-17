@@ -1,45 +1,25 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Users, FileSearch, Activity, ShieldCheck } from "lucide-react";
+import { Users, UserCheck, FileSearch, Activity, ShieldCheck, Database, Plug, Workflow, FileText, History } from "lucide-react";
+import { cn } from "@/lib/cn";
+import { PageHero, HeroChip, MetricTile, SectionCard, Panel, StatRow, StatusPill } from "@/components/admin/AdminUi";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/auth/guard";
-import { StatCard } from "@/components/ui/StatCard";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate } from "@/lib/data/format";
 import { RUN_KIND_LABELS, RUN_KINDS, loadLatestRuns } from "@/lib/jobs/display";
 import { isRestConfigured, isStreamConfigured } from "@/lib/companies-house/client";
+import { loadOfficerPipelineStatus } from "@/lib/companies-house/officerStatus";
+import { OfficerPipelinePanel } from "@/components/admin/OfficerPipelinePanel";
+import { AdminTabs } from "@/components/admin/AdminTabs";
+import { describeAction } from "@/lib/staff/actions";
 
 
 export const metadata: Metadata = { title: "Super Admin" };
 
-function describeAction(action: string, meta: string | null): string {
-  const data = meta ? JSON.parse(meta) : {};
-  switch (action) {
-    case "login":
-      return "Signed in";
-    case "report_created":
-      return `Created report "${data.name}"`;
-    case "company_follow_toggle":
-      return `${data.followed ? "Followed" : "Unfollowed"} ${data.companyName}`;
-    case "company_trash_toggle":
-      return `${data.trashed ? "Sent to trash" : "Restored"} ${data.companyName}`;
-    case "director_contact_added":
-      return `Added contact "${data.name}"`;
-    case "search":
-      return `Searched${data.q ? ` "${data.q}"` : ""}${data.activeRules ? ` with ${data.activeRules} filter${data.activeRules > 1 ? "s" : ""}` : ""} (${data.total} results)`;
-    case "export_csv":
-      return `Exported ${data.rows ?? "?"} companies to CSV`;
-    case "user_created":
-      return `Created a ${String(data.role ?? "USER").replace("_", " ").toLowerCase()} account`;
-    case "user_updated":
-      return "Changed a user account";
-    default:
-      return action;
-  }
-}
-
 export default async function SuperAdminPage() {
   await requireRole("SUPER_ADMIN");
+  const officerStatus = await loadOfficerPipelineStatus();
 
   const [
     userCount,
@@ -75,80 +55,81 @@ export default async function SuperAdminPage() {
   const connectedCalendars = calendarConnections.filter((c) => c.status === "CONNECTED").length;
   const erroredCalendars = calendarConnections.filter((c) => c.status === "ERROR").length;
 
+  const restOk = isRestConfigured();
+  const streamOk = isStreamConfigured();
+  const failedRuns = latestRuns.filter((v) => v.tone === "red");
+
   return (
     <div className="space-y-6">
-      <div>
-        <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-indigo-600">
-          <ShieldCheck className="h-3.5 w-3.5" /> Super Admin
-        </p>
-        <h2 className="text-lg font-semibold text-slate-900">System-wide oversight</h2>
-        <p className="text-sm text-slate-500">Every user&apos;s searches, reports, exports and CRM activity, in one place.</p>
-      </div>
+      <AdminTabs active="overview" />
+      <PageHero icon={ShieldCheck} eyebrow="Super Admin" title="System-wide oversight" description="Every user's searches, reports, exports and CRM activity, in one place.">
+        <HeroChip label="Pipeline" value={failedRuns.length === 0 ? "No failed jobs" : `${failedRuns.length} failed job${failedRuns.length === 1 ? "" : "s"}`} dot={failedRuns.length === 0 ? "green" : "red"} />
+        <HeroChip label="Officer data" value={officerStatus.healthy ? "Healthy" : "Needs attention"} dot={officerStatus.healthy ? "green" : "amber"} />
+        <HeroChip label="Companies House" value={restOk && streamOk ? "Configured" : "Not fully configured"} dot={restOk && streamOk ? "green" : "amber"} />
+      </PageHero>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Total users" value={userCount.toLocaleString()} icon={Users} accent="indigo" />
-        <StatCard label="Active users" value={activeUserCount.toLocaleString()} icon={Users} accent="emerald" />
-        <StatCard label="Reports created" value={reportCount.toLocaleString()} icon={FileSearch} accent="amber" />
-        <StatCard label="Companies stored" value={companiesCount.toLocaleString()} icon={Activity} accent="slate" />
+        <MetricTile label="Total users" value={userCount.toLocaleString()} icon={Users} tone="blue" />
+        <MetricTile label="Active users" value={activeUserCount.toLocaleString()} icon={UserCheck} tone="emerald" />
+        <MetricTile label="Reports created" value={reportCount.toLocaleString()} icon={FileSearch} tone="amber" />
+        <MetricTile label="Companies stored" value={companiesCount.toLocaleString()} icon={Database} tone="violet" />
       </div>
 
-      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className="border-b border-slate-100 px-5 py-3">
-          <h3 className="text-sm font-semibold text-slate-900">Companies House pipeline health</h3>
+      <SectionCard
+        icon={Activity}
+        tone="blue"
+        title="Companies House pipeline health"
+        description="Connection status and the latest run of each ingestion job."
+        action={failedRuns.length > 0 ? <StatusPill tone="red">{failedRuns.length} failed</StatusPill> : <StatusPill tone="green">All jobs OK</StatusPill>}
+      >
+        <div className="grid gap-5 p-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+          <Panel icon={Plug} tone="blue" title="Connections">
+            <StatRow label="REST API">
+              <StatusPill tone={restOk ? "green" : "amber"}>{restOk ? "Configured" : "Not configured"}</StatusPill>
+            </StatRow>
+            <StatRow label="Filing stream">
+              <StatusPill tone={streamOk ? "green" : "amber"}>{streamOk ? "Configured" : "Not configured"}</StatusPill>
+            </StatRow>
+            <StatRow label="Real Companies House companies">{realCompanies.toLocaleString()}</StatRow>
+            <StatRow label="Calendars connected">
+              {connectedCalendars}
+              {erroredCalendars > 0 && <span className="ml-1 text-red-600">({erroredCalendars} in error)</span>}
+            </StatRow>
+          </Panel>
+          <Panel icon={Workflow} tone="indigo" title="Latest job runs">
+            <div className="space-y-1.5">
+              {latestRuns.map((v, i) => (
+                <div
+                  key={RUN_KINDS[i]}
+                  className={cn(
+                    "flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border px-3 py-2 text-sm",
+                    v.tone === "red" ? "border-red-200 bg-red-50/70" : "border-slate-200 bg-white"
+                  )}
+                >
+                  <span className="font-medium text-slate-700">{RUN_KIND_LABELS[RUN_KINDS[i]]}</span>
+                  {v.run ? (
+                    <span className="flex flex-wrap items-center gap-2">
+                      <StatusPill tone={v.tone}>{v.status}</StatusPill>
+                      {v.detail && <span className="text-xs text-slate-500">{v.detail}</span>}
+                      <span className="text-xs text-slate-400">{formatDate(v.run.finishedAt ?? v.run.startedAt)}</span>
+                    </span>
+                  ) : (
+                    <span className="text-xs text-slate-400">Never run</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Panel>
         </div>
-        <div className="grid gap-4 p-5 sm:grid-cols-2">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-slate-600">REST API</span>
-              <Badge tone={isRestConfigured() ? "green" : "amber"}>
-                {isRestConfigured() ? "Configured" : "Not configured"}
-              </Badge>
-            </div>
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-slate-600">Filing stream</span>
-              <Badge tone={isStreamConfigured() ? "green" : "amber"}>
-                {isStreamConfigured() ? "Configured" : "Not configured"}
-              </Badge>
-            </div>
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-slate-600">Real Companies House companies</span>
-              <span className="font-medium text-slate-900">{realCompanies.toLocaleString()}</span>
-            </div>
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-slate-600">Calendars connected</span>
-              <span className="font-medium text-slate-900">
-                {connectedCalendars}
-                {erroredCalendars > 0 && <span className="ml-1 text-red-600">({erroredCalendars} in error)</span>}
-              </span>
-            </div>
-          </div>
-          <div className="space-y-1.5">
-            {latestRuns.map((v, i) => (
-              <div key={RUN_KINDS[i]} className="flex items-center justify-between text-sm">
-                <span className="text-slate-600">{RUN_KIND_LABELS[RUN_KINDS[i]]}</span>
-                {v.run ? (
-                  <span className="flex items-center gap-2">
-                    <Badge tone={v.tone}>{v.status}</Badge>
-                    {v.detail && <span className="text-xs text-slate-400">{v.detail}</span>}
-                    <span className="text-xs text-slate-400">{formatDate(v.run.finishedAt ?? v.run.startedAt)}</span>
-                  </span>
-                ) : (
-                  <span className="text-xs text-slate-400">Never run</span>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
+      </SectionCard>
+
+      <OfficerPipelinePanel status={officerStatus} />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-          <div className="border-b border-slate-100 px-5 py-3">
-            <h3 className="text-sm font-semibold text-slate-900">All saved reports</h3>
-          </div>
+        <SectionCard icon={FileText} tone="amber" title="All saved reports" description="Most recent 20 across all users.">
           <ul className="max-h-[420px] divide-y divide-slate-100 overflow-y-auto">
             {allReports.map((r) => (
-              <li key={r.id} className="px-5 py-3">
+              <li key={r.id} className="px-5 py-3 transition-colors hover:bg-indigo-50/40">
                 <div className="flex items-center justify-between">
                   <Link href={`/reports/${r.id}`} className="text-sm font-medium text-slate-900 hover:text-indigo-600">
                     {r.name}
@@ -162,15 +143,12 @@ export default async function SuperAdminPage() {
             ))}
             {allReports.length === 0 && <li className="px-5 py-4 text-sm text-slate-400">No reports yet.</li>}
           </ul>
-        </section>
+        </SectionCard>
 
-        <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-          <div className="border-b border-slate-100 px-5 py-3">
-            <h3 className="text-sm font-semibold text-slate-900">Activity across all users</h3>
-          </div>
+        <SectionCard icon={History} tone="slate" title="Activity across all users" description="Latest 25 events.">
           <ul className="max-h-[420px] divide-y divide-slate-100 overflow-y-auto">
             {recentActivity.map((entry) => (
-              <li key={entry.id} className="flex items-center justify-between px-5 py-3 text-sm">
+              <li key={entry.id} className="flex items-center justify-between gap-3 px-5 py-3 text-sm transition-colors hover:bg-slate-50">
                 <span className="text-slate-700">
                   <span className="font-medium">{entry.user.name}</span> — {describeAction(entry.action, entry.meta)}
                 </span>
@@ -179,7 +157,7 @@ export default async function SuperAdminPage() {
             ))}
             {recentActivity.length === 0 && <li className="px-5 py-4 text-sm text-slate-400">No activity yet.</li>}
           </ul>
-        </section>
+        </SectionCard>
       </div>
     </div>
   );

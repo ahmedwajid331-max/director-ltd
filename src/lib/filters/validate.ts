@@ -104,7 +104,7 @@ function validateRule(raw: Record<string, unknown>, path: string, ctx: Ctx): Fil
     }
     case "enum": {
       const v = String(raw.value);
-      const ok = field === "status" ? STATUS_VALUES.has(v) : SLUG.test(v);
+      const ok = field === "status" ? STATUS_VALUES.has(v) : field === "nameLetter" ? /^[A-Z]$/.test(v) : SLUG.test(v);
       if (!ok) {
         ctx.errors.push(`${path}: "${v.slice(0, 40)}" is not a valid ${def.label}`);
         return null;

@@ -32,6 +32,8 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  // pdfkit reads its built-in font files from disk at runtime, so it must not be bundled.
+  serverExternalPackages: ["pdfkit"],
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },

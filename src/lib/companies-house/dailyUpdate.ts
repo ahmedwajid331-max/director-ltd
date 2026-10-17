@@ -1,12 +1,15 @@
 import { db } from "@/lib/db";
 import { buildCompanyWhere } from "@/lib/data/companies";
-import { syncCompanyDirectors } from "./sync";
-import { CompaniesHouseRateLimitError, isRestConfigured } from "./client";
+import { isRestConfigured } from "./client";
 import { reconcilePendingFilingEvents } from "./filingEvents";
+import { enqueueFollowedCompanies, enqueueOfficerJobs, loadOfficerConfig, OFFICER_PRIORITY } from "./officerQueue";
+import { hasActiveDirectorRules } from "@/lib/filters/compile";
 import { finishRun, reconcileStaleRuns, startRun, touchRun } from "@/lib/jobs/runs";
 
 export interface DailyUpdateOptions {
-  officerBackfillBatchSize?: number;
+  // Max companies one report / the followed list may add to the officer queue
+  // per run (default OFFICER_ENQUEUE_CAP). 0 disables the orchestration step.
+  officerEnqueueCap?: number;
 }
 
 export interface DailyUpdateResult {
@@ -14,8 +17,8 @@ export interface DailyUpdateResult {
   overdueRecomputed: number;
   pendingEventsApplied: number;
   pendingEventsRemaining: number;
-  officersBackfilled: number;
-  officersFailed: number;
+  officersQueuedForReports: number;
+  officersQueuedForFollowed: number;
   reportsRefreshed: number;
   reportsFailed: number;
 }
@@ -30,21 +33,28 @@ function utcToday(): Date {
 //   0. close dead "running" jobs
 //   1. recompute overdue flags from stored due dates (both directions)
 //   2. apply any DS01/DS02 stream events that could not be applied earlier
-//   3. advance the rate-limited officer backfill (own `officer_backfill` run)
+//   3. QUEUE officer work for saved director reports (P1) and followed
+//      companies (P2). This is orchestration only - a few SQL statements, no
+//      Companies House calls. All officer fetching belongs to the dedicated
+//      officer worker (npm run ch:officer-worker).
 //   4. refresh every report flagged dailyRefresh
 // It does NOT re-download company profiles: the monthly bulk file is the
 // refresh for profile data, the stream covers DS01 in near real time.
 export async function runDailyUpdate(options: DailyUpdateOptions = {}): Promise<DailyUpdateResult> {
-  const batchSize = options.officerBackfillBatchSize ?? Number(process.env.OFFICER_BACKFILL_BATCH ?? 500);
+  const enqueueCap = options.officerEnqueueCap ?? loadOfficerConfig().enqueueCap;
   const run = await startRun("daily_update");
+  // The parent run heartbeats on a timer, so a slow step can never make it
+  // look dead to the stale-run reconciliation.
+  const heartbeat = setInterval(() => void touchRun(run.id).catch(() => {}), 30_000);
+  heartbeat.unref?.();
 
   const result: DailyUpdateResult = {
     staleRunsClosed: 0,
     overdueRecomputed: 0,
     pendingEventsApplied: 0,
     pendingEventsRemaining: 0,
-    officersBackfilled: 0,
-    officersFailed: 0,
+    officersQueuedForReports: 0,
+    officersQueuedForFollowed: 0,
     reportsRefreshed: 0,
     reportsFailed: 0,
   };
@@ -77,38 +87,30 @@ export async function runDailyUpdate(options: DailyUpdateOptions = {}): Promise<
       result.pendingEventsRemaining = rec.stillPending;
     }
 
-    // 3. Officer backfill: real (non-seed) companies without officer data,
-    // active companies first. Bounded per run so the 600 req / 5 min quota
-    // is shared fairly; stops cleanly when the quota is exhausted.
-    if (isRestConfigured() && batchSize > 0) {
-      const backfill = await startRun("officer_backfill");
-      let read = 0;
-      try {
-        const base = { source: { not: "seed" }, officersCoverage: { not: "full" } } as const;
-        const active = await db.company.findMany({ where: { ...base, status: "active" }, orderBy: { updatedAt: "asc" }, take: batchSize });
-        const others = active.length < batchSize
-          ? await db.company.findMany({ where: { ...base, status: { not: "active" } }, orderBy: { updatedAt: "asc" }, take: batchSize - active.length })
-          : [];
-        for (const company of [...active, ...others]) {
-          read++;
-          try {
-            await syncCompanyDirectors(company.id, company.companyNumber);
-            result.officersBackfilled++;
-          } catch (err) {
-            result.officersFailed++;
-            if (err instanceof CompaniesHouseRateLimitError) break;
-          }
-          if (read % 50 === 0) await touchRun(backfill.id, { rowsRead: read, rowsProcessed: result.officersBackfilled, rowsFailed: result.officersFailed });
+    // 3. Queue officer work (no API calls here). Reports first (P1), then
+    // followed companies (P2). Idempotent: re-running never duplicates jobs and
+    // keeps the highest priority.
+    if (enqueueCap > 0) {
+      const reports = await db.report.findMany({ where: { dailyRefresh: true } });
+      for (const report of reports) {
+        try {
+          const filter = JSON.parse(report.filterJson);
+          if (!hasActiveDirectorRules(filter)) continue;
+          const where = buildCompanyWhere({ filter, mode: "possible", userId: report.ownerId });
+          const candidates = await db.company.findMany({
+            where: { AND: [where, { officersCoverage: "none" }] },
+            select: { id: true },
+            orderBy: { id: "asc" },
+            take: enqueueCap + 1,
+          });
+          const queued = await enqueueOfficerJobs(candidates.map((c) => c.id), { priority: OFFICER_PRIORITY.REPORT, reason: "report", cap: enqueueCap });
+          result.officersQueuedForReports += queued.inserted;
+        } catch {
+          /* a broken report must not stop the daily job; the refresh step below records its error */
         }
-        const failedRate = read === 0 ? 0 : result.officersFailed / read;
-        await finishRun(backfill.id, failedRate > 0.5 ? "failed" : failedRate > 0.05 ? "partial" : "success", {
-          rowsRead: read,
-          rowsProcessed: result.officersBackfilled,
-          rowsFailed: result.officersFailed,
-        });
-      } catch (err) {
-        await finishRun(backfill.id, "failed", { rowsRead: read, errorMessage: err instanceof Error ? err.message : String(err) });
       }
+      result.officersQueuedForFollowed = (await enqueueFollowedCompanies(enqueueCap)).inserted;
+      await touchRun(run.id);
     }
 
     // 4. Report refresh (counts only what the user is allowed to see - the
@@ -116,8 +118,11 @@ export async function runDailyUpdate(options: DailyUpdateOptions = {}): Promise<
     const reports = await db.report.findMany({ where: { dailyRefresh: true } });
     for (const report of reports) {
       try {
-        const resultCount = await db.company.count({ where: buildCompanyWhere({ filter: JSON.parse(report.filterJson) }) });
-        await db.report.update({ where: { id: report.id }, data: { resultCount, lastRunAt: new Date(), lastRefreshError: null } });
+        const resultCount = await db.company.count({ where: buildCompanyWhere({ filter: JSON.parse(report.filterJson), userId: report.ownerId }) });
+        const now = new Date();
+        // lastAutoRefreshAt is written HERE and nowhere else, and only after the count succeeded: it is the one field that
+        // means "the scheduled job refreshed this report". A failure (below) records the error and leaves both timestamps alone.
+        await db.report.update({ where: { id: report.id }, data: { resultCount, lastRunAt: now, lastAutoRefreshAt: now, lastRefreshError: null } });
         result.reportsRefreshed++;
       } catch (err) {
         result.reportsFailed++;
@@ -128,11 +133,11 @@ export async function runDailyUpdate(options: DailyUpdateOptions = {}): Promise<
       }
     }
 
-    const failed = result.officersFailed + result.reportsFailed;
-    const total = result.officersBackfilled + result.reportsRefreshed + failed;
+    const failed = result.reportsFailed;
+    const total = result.reportsRefreshed + failed;
     await finishRun(run.id, failed === 0 ? "success" : failed / Math.max(total, 1) > 0.5 ? "failed" : "partial", {
       rowsRead: total,
-      rowsProcessed: result.overdueRecomputed + result.officersBackfilled + result.reportsRefreshed + result.pendingEventsApplied,
+      rowsProcessed: result.overdueRecomputed + result.reportsRefreshed + result.pendingEventsApplied,
       rowsFailed: failed,
       statsJson: JSON.stringify(result),
     });
@@ -140,5 +145,7 @@ export async function runDailyUpdate(options: DailyUpdateOptions = {}): Promise<
   } catch (err) {
     await finishRun(run.id, "failed", { errorMessage: err instanceof Error ? err.message : String(err), statsJson: JSON.stringify(result) });
     throw err;
+  } finally {
+    clearInterval(heartbeat);
   }
 }

@@ -183,6 +183,37 @@ const REAL_ACCOUNT_CATEGORIES = [
   "GROUP", "TOTAL EXEMPTION SMALL", "MEDIUM", "ACCOUNTS TYPE NOT AVAILABLE", "AUDITED ABRIDGED", "FILING EXEMPTION SUBSIDIARY", "PARTIAL EXEMPTION", "INITIAL",
 ];
 
+// Expected status per raw label, as reported by the live Companies House API for a sample of each label (October 2026).
+// "Live but Receiver Manager on at least one charge" is genuinely `receivership` in the API (29/30; the odd one had moved on),
+// so it must NOT be turned into `active`. The five compound labels are `insolvency-proceedings` in the API.
+const STATUS_EXPECTED: Record<string, string> = {
+  "Active": "active",
+  "Active - Proposal to Strike off": "active",
+  "Liquidation": "liquidation",
+  "In Administration": "administration",
+  "ADMINISTRATION ORDER": "administration",
+  "Live but Receiver Manager on at least one charge": "receivership",
+  "RECEIVERSHIP": "receivership",
+  "ADMINISTRATIVE RECEIVER": "receivership",
+  "Voluntary Arrangement": "voluntary-arrangement",
+  "In Administration/Administrative Receiver": "insolvency-proceedings",
+  "In Administration/Receiver Manager": "insolvency-proceedings",
+  "RECEIVER MANAGER / ADMINISTRATIVE RECEIVER": "insolvency-proceedings",
+  "VOLUNTARY ARRANGEMENT / RECEIVER MANAGER": "insolvency-proceedings",
+  "VOLUNTARY ARRANGEMENT / ADMINISTRATIVE RECEIVER": "insolvency-proceedings",
+};
+
+test("each real status label maps to the status the Companies House API reports for it", () => {
+  assert.deepEqual(Object.keys(STATUS_EXPECTED).sort(), [...REAL_STATUSES].sort(), "every real label is covered");
+  for (const [label, expected] of Object.entries(STATUS_EXPECTED)) {
+    const r = mapCsvRecord(record({ CompanyStatus: label }), emptyMappingStats());
+    assert.ok(r.ok);
+    if (r.ok) assert.equal(r.row.status, expected, label);
+  }
+  const strike = mapCsvRecord(record({ CompanyStatus: "Active - Proposal to Strike off" }), emptyMappingStats());
+  assert.ok(strike.ok && strike.row.hasDS01 && strike.row.statusDetail === "active-proposal-to-strike-off");
+});
+
 test("every real-world status / category / account-category value is explicitly mapped", () => {
   const stats = emptyMappingStats();
   for (const v of REAL_STATUSES) assert.ok(mapCsvRecord(record({ CompanyStatus: v }), stats).ok);

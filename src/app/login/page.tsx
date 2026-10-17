@@ -3,6 +3,7 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { ShieldCheck, Filter, FileSpreadsheet, Users2 } from "lucide-react";
 import { LoginForm } from "./LoginForm";
+import { MonitoringNotice } from "@/components/staff/MonitoringNotice";
 
 export const metadata: Metadata = { title: "Sign in" };
 
@@ -71,6 +72,7 @@ export default function LoginPage() {
           <div className="mt-6">
             <Suspense>
               <LoginForm />
+          <div className="mt-6"><MonitoringNotice /></div>
             </Suspense>
           </div>
 

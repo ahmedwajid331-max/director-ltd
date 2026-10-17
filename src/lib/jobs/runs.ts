@@ -8,32 +8,60 @@ import { db } from "@/lib/db";
 //    Settings/Super Admin never show a crashed job as still running;
 //  - a run is only "success" if its failure rate is honestly low.
 
-export type RunKind = "advanced_search" | "bulk_csv" | "stream" | "officer_backfill" | "daily_update";
+export type RunKind = "advanced_search" | "bulk_csv" | "stream" | "officer_backfill" | "daily_update" | "new_registrations";
 export type RunStatus = "running" | "success" | "partial" | "failed";
 
 // Jobs heartbeat at least every minute (stream: every 30s, CSV: every batch).
 export const STALE_AFTER_MS = 10 * 60 * 1000;
+// The officer worker heartbeats on a timer every ~30s, so a few missed beats
+// already mean it is dead.
+export const OFFICER_WORKER_STALE_AFTER_MS = 2 * 60 * 1000;
 
-export function isStale(run: Pick<IngestionRun, "status" | "heartbeatAt">, now: Date = new Date()): boolean {
-  return run.status === "running" && now.getTime() - run.heartbeatAt.getTime() > STALE_AFTER_MS;
+export function staleAfterMs(kind: string): number {
+  return kind === "officer_backfill" ? OFFICER_WORKER_STALE_AFTER_MS : STALE_AFTER_MS;
+}
+
+// Written by reconcileStaleRuns. A worker that was merely paused (laptop sleep, long GC, DB outage) can heartbeat again
+// after being reconciled; such a row is not a real failure.
+export const RECONCILED_MESSAGE = "Job stopped without finishing (no heartbeat); marked failed by stale-run reconciliation.";
+
+export function isStale(run: Pick<IngestionRun, "status" | "heartbeatAt"> & { kind?: string }, now: Date = new Date()): boolean {
+  return run.status === "running" && now.getTime() - run.heartbeatAt.getTime() > staleAfterMs(run.kind ?? "");
 }
 
 // What to show for a run without writing anything (used by Settings/Admin).
-export function effectiveStatus(run: Pick<IngestionRun, "status" | "heartbeatAt">, now: Date = new Date()): string {
+export function effectiveStatus(
+  run: Pick<IngestionRun, "status" | "heartbeatAt"> & { kind?: string; finishedAt?: Date | null; errorMessage?: string | null },
+  now: Date = new Date()
+): string {
+  // Reconciled as failed, but the worker has heartbeated since and still is: it is alive.
+  if (
+    run.status === "failed" &&
+    run.errorMessage === RECONCILED_MESSAGE &&
+    run.finishedAt &&
+    run.heartbeatAt > run.finishedAt &&
+    now.getTime() - run.heartbeatAt.getTime() <= staleAfterMs(run.kind ?? "")
+  ) {
+    return "running";
+  }
   return isStale(run, now) ? "stalled" : run.status;
 }
 
 export async function reconcileStaleRuns(now: Date = new Date()): Promise<number> {
-  const cutoff = new Date(now.getTime() - STALE_AFTER_MS);
-  const res = await db.ingestionRun.updateMany({
-    where: { status: "running", heartbeatAt: { lt: cutoff } },
-    data: {
-      status: "failed",
-      finishedAt: now,
-      errorMessage: "Job stopped without finishing (no heartbeat); marked failed by stale-run reconciliation.",
-    },
+  const data = {
+    status: "failed",
+    finishedAt: now,
+    errorMessage: RECONCILED_MESSAGE,
+  };
+  const officer = await db.ingestionRun.updateMany({
+    where: { status: "running", kind: "officer_backfill", heartbeatAt: { lt: new Date(now.getTime() - OFFICER_WORKER_STALE_AFTER_MS) } },
+    data,
   });
-  return res.count;
+  const others = await db.ingestionRun.updateMany({
+    where: { status: "running", kind: { not: "officer_backfill" }, heartbeatAt: { lt: new Date(now.getTime() - STALE_AFTER_MS) } },
+    data,
+  });
+  return officer.count + others.count;
 }
 
 export class JobAlreadyRunningError extends Error {
@@ -45,7 +73,7 @@ export class JobAlreadyRunningError extends Error {
 // Kinds that must not overlap with themselves (two daily updates or two bulk
 // loads racing would duplicate work and fight over rows). The stream is
 // exempt: Companies House itself allows a single connection per key.
-const SINGLE_FLIGHT: RunKind[] = ["bulk_csv", "daily_update", "officer_backfill", "advanced_search"];
+const SINGLE_FLIGHT: RunKind[] = ["bulk_csv", "daily_update", "officer_backfill", "advanced_search", "new_registrations"];
 
 export async function startRun(
   kind: RunKind,
@@ -53,15 +81,27 @@ export async function startRun(
   options: { force?: boolean } = {}
 ) {
   await reconcileStaleRuns();
-  if (!options.force && SINGLE_FLIGHT.includes(kind)) {
-    const live = await db.ingestionRun.findFirst({ where: { kind, status: "running" } });
+  const create = { ...data, kind, status: "running" } as Prisma.IngestionRunUncheckedCreateInput;
+  if (options.force || !SINGLE_FLIGHT.includes(kind)) return db.ingestionRun.create({ data: create });
+
+  // Single-flight: the check and the insert happen under a PostgreSQL advisory
+  // lock (transaction-scoped, so it is safe with a connection pool), so two
+  // processes starting at the same instant cannot both see "nothing running".
+  return db.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${"ingestion_run:" + kind}))`;
+    const live = await tx.ingestionRun.findFirst({ where: { kind, status: "running" } });
     if (live) throw new JobAlreadyRunningError(kind, live.id);
-  }
-  return db.ingestionRun.create({ data: { ...data, kind, status: "running" } as Prisma.IngestionRunUncheckedCreateInput });
+    return tx.ingestionRun.create({ data: create });
+  });
 }
 
 export async function touchRun(id: string, patch: Prisma.IngestionRunUpdateInput = {}) {
   await db.ingestionRun.update({ where: { id }, data: { ...patch, heartbeatAt: new Date() } });
+  // A live worker touching a row that stale-reconciliation wrongly failed brings it back to running.
+  await db.ingestionRun.updateMany({
+    where: { id, status: "failed", errorMessage: RECONCILED_MESSAGE },
+    data: { status: "running", finishedAt: null, errorMessage: null },
+  });
 }
 
 export async function finishRun(id: string, status: Exclude<RunStatus, "running">, patch: Prisma.IngestionRunUpdateInput = {}) {

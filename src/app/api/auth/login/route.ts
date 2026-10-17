@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { verifyPassword, getDummyHash } from "@/lib/auth/password";
 import { createSessionToken, setSessionCookie } from "@/lib/auth/session";
 import { clearFailedLogins, clientIp, isLoginBlocked, recordFailedLogin } from "@/lib/auth/login-throttle";
+import { logActivity } from "@/lib/activity";
 import type { UserRole } from "@/lib/types";
 
 const loginSchema = z.object({
@@ -42,22 +43,30 @@ export async function POST(request: Request) {
 
   if (!user || !user.active || !valid) {
     await recordFailedLogin(email, ip);
+    // Recorded against a real account only (an unknown address has no owner, and the log must not collect guesses).
+    // No IP or password data is stored; the reason distinguishes a deactivated account from a wrong password.
+    if (user) await logActivity({ userId: user.id }, "login_failed", { meta: { reason: !user.active ? "inactive" : "bad_password" }, dedupeMs: 10_000 });
     return NextResponse.json({ error: GENERIC_FAILURE }, { status: 401 });
   }
 
+  const now = new Date();
+  const [session] = await db.$transaction([
+    db.userSession.create({
+      data: { userId: user.id, startedAt: now, lastActivityAt: now, userAgent: request.headers.get("user-agent")?.slice(0, 200) ?? null },
+      select: { id: true },
+    }),
+    db.user.update({ where: { id: user.id }, data: { lastLoginAt: now } }),
+  ]);
   const token = await createSessionToken({
     userId: user.id,
     email: user.email,
     name: user.name,
     role: user.role as UserRole,
+    sid: session.id,
   });
   await setSessionCookie(token);
   await clearFailedLogins(email, ip);
-
-  await db.$transaction([
-    db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } }),
-    db.activityLog.create({ data: { userId: user.id, action: "login", meta: null } }),
-  ]);
+  await logActivity({ userId: user.id, sid: session.id }, "login");
 
   return NextResponse.json({ ok: true });
 }

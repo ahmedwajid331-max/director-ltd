@@ -1,4 +1,5 @@
 import type { FilterFieldDef } from "./types";
+import { LETTER_OPTIONS } from "./nameLetter";
 
 // Matches the real Companies House `company_status` enum exactly
 // (companieshouse/api-enumerations) — not an invented simplification.
@@ -43,6 +44,15 @@ export const COMPANY_FILTER_FIELDS: FilterFieldDef[] = [
     type: "string",
     operators: ["contains", "equals", "startsWith"],
     group: "Identity",
+  },
+  {
+    key: "nameLetter",
+    label: "Company name starts with letter",
+    type: "enum",
+    operators: ["equals"],
+    options: LETTER_OPTIONS,
+    group: "Identity",
+    description: "The same as the A to Z bar on the Companies page.",
   },
   {
     key: "companyNumber",
@@ -147,11 +157,58 @@ export const COMPANY_FILTER_FIELDS: FilterFieldDef[] = [
     group: "Filing status",
   },
   {
+    key: "accountsLastMadeUp",
+    label: "Accounts last made up to",
+    type: "date",
+    operators: ["before", "after", "dateBetween"],
+    group: "Filing status",
+    description: "End date of the last accounts filed. Companies with no accounts filed never match.",
+  },
+  {
+    key: "confirmationNextDue",
+    label: "Confirmation statement due",
+    type: "date",
+    operators: ["before", "after", "dateBetween"],
+    group: "Filing status",
+  },
+  {
+    key: "confirmationLastMadeUp",
+    label: "Confirmation last made up",
+    type: "date",
+    operators: ["before", "after", "dateBetween"],
+    group: "Filing status",
+    description: "Companies that have never filed a confirmation statement never match.",
+  },
+  {
     key: "hasDS01",
     label: "DS01 filed (strike-off)",
     type: "boolean",
     operators: ["isTrue", "isFalse"],
     group: "Filing status",
+  },
+  {
+    key: "followed",
+    label: "Followed",
+    type: "boolean",
+    operators: ["isTrue", "isFalse"],
+    group: "My CRM",
+    description: "Your own followed companies",
+  },
+  {
+    key: "saved",
+    label: "Saved",
+    type: "boolean",
+    operators: ["isTrue", "isFalse"],
+    group: "My CRM",
+    description: "Your own saved companies",
+  },
+  {
+    key: "redFlagged",
+    label: "Red flagged",
+    type: "boolean",
+    operators: ["isTrue", "isFalse"],
+    group: "My CRM",
+    description: "Your own red-flagged companies",
   },
   {
     key: "sicCodes",
@@ -160,6 +217,27 @@ export const COMPANY_FILTER_FIELDS: FilterFieldDef[] = [
     operators: ["contains"],
     group: "Identity",
     placeholder: "e.g. 62012",
+  },
+  {
+    key: "dissolutionDate",
+    label: "Dissolved date",
+    type: "date",
+    operators: ["before", "after", "dateBetween"],
+    group: "Identity",
+  },
+  {
+    key: "registeredAddress1",
+    label: "Address line 1",
+    type: "string",
+    operators: ["contains"],
+    group: "Address",
+  },
+  {
+    key: "registeredAddress2",
+    label: "Address line 2",
+    type: "string",
+    operators: ["contains"],
+    group: "Address",
   },
 ];
 

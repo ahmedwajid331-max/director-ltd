@@ -1,6 +1,7 @@
 // Live check against the REAL Companies House API (needs COMPANIES_HOUSE_API_KEY; ~4 requests).
 //   npx tsx tests/live/officers-live.ts
 // Verifies officer pagination with a company known to span several pages (Tesco PLC, 00445790).
+import "../support/require-scratch-db"; // must stay first: this script WRITES (company + officers)
 import { chRestGetWithRateInfo } from "../../src/lib/companies-house/client";
 import { countActiveDirectors, fetchCompanyOfficers } from "../../src/lib/companies-house/officers";
 import { syncCompanyDirectors, syncCompanyProfile } from "../../src/lib/companies-house/sync";

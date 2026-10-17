@@ -25,6 +25,7 @@ export function Pagination({
         <button
           onClick={() => onPageChange(page - 1)}
           disabled={page <= 1}
+          aria-label="Previous page"
           className="rounded-md p-1.5 hover:bg-slate-100 disabled:opacity-40"
         >
           <ChevronLeft className="h-4 w-4" />
@@ -35,6 +36,7 @@ export function Pagination({
         <button
           onClick={() => onPageChange(page + 1)}
           disabled={page >= pageCount}
+          aria-label="Next page"
           className="rounded-md p-1.5 hover:bg-slate-100 disabled:opacity-40"
         >
           <ChevronRight className="h-4 w-4" />

@@ -22,9 +22,10 @@ export interface CalendarProvider {
   name: "GOOGLE" | "MICROSOFT" | "INTERNAL";
 
   // OAuth providers only — the internal provider is always "connected" and
-  // returns null here.
-  getAuthUrl?(userId: string): string;
-  handleCallback?(code: string, state: string): Promise<CalendarConnection>;
+  // returns null here. `state` is the one-time random value from oauth-state.ts;
+  // handleCallback receives the signed-in user's id (already verified by the route).
+  getAuthUrl?(state: string): string;
+  handleCallback?(code: string, userId: string): Promise<CalendarConnection>;
 
   createEvent(connection: CalendarConnection, input: CalendarEventInput): Promise<string>; // returns externalEventId
   updateEvent(connection: CalendarConnection, externalEventId: string, input: CalendarEventInput): Promise<void>;

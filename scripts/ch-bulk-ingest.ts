@@ -6,6 +6,12 @@
 //     npm run ch:bulk-ingest -- --resume <runId> --input <same file>
 //     npm run ch:bulk-ingest -- --resume-latest --input <same file>
 //
+//   Verify without writing anything (parses the whole file, predicts inserts/updates/unchanged/protected/rejected):
+//     npm run ch:bulk-ingest -- --input <file> --dry-run [--snapshot-date YYYY-MM-DD]
+//   Retry the database-failed rows of a finished run from its failed-row ledger:
+//     npm run ch:bulk-ingest -- --retry-failed <runId>
+//   --snapshot-date defaults to the date in the file name; live stream/REST data newer than it is never overwritten.
+//
 //   Advanced Search API slice (small real sample for development):
 //     npm run ch:bulk-ingest -- --search --status active --limit 2000 --enrich 200
 //
@@ -13,7 +19,7 @@
 //   --i-understand-this-is-the-full-register
 // without --limit. Nothing here runs automatically.
 import fs from "node:fs";
-import { bulkIngestFromCsv, bulkIngestFromSearch } from "../src/lib/companies-house/bulkIngest";
+import { bulkIngestFromCsv, bulkIngestFromSearch, retryFailedRows } from "../src/lib/companies-house/bulkIngest";
 import { db } from "../src/lib/db";
 import { makeLogger } from "../src/lib/log";
 
@@ -45,6 +51,13 @@ async function main() {
     return;
   }
 
+  if (has("--retry-failed")) {
+    const runId = val("--retry-failed");
+    if (!runId) throw new Error("--retry-failed needs a run id");
+    console.log("Retry result:", await retryFailedRows(runId, { log: (m) => logger.info(m) }));
+    return;
+  }
+
   const input = val("--input");
   const wantsLatest = has("--latest");
   if (!input && !wantsLatest) {
@@ -71,17 +84,19 @@ async function main() {
     resumeRunId = last.id;
   }
 
-  console.log(`Starting CSV ingest of ${input ?? "latest monthly file"}${limit ? ` (limit ${limit} rows)` : ""}...`);
+  console.log(`Starting CSV ${has("--dry-run") ? "DRY RUN (writes nothing) " : ""}ingest of ${input ?? "latest monthly file"}${limit ? ` (limit ${limit} rows)` : ""}...`);
   const result = await bulkIngestFromCsv({
     input,
     limit,
     batchSize: val("--batch") ? Number(val("--batch")) : undefined,
     resumeRunId,
+    dryRun: has("--dry-run"),
+    snapshotDate: val("--snapshot-date") ? new Date(`${val("--snapshot-date")}T00:00:00.000Z`) : undefined,
     signal: controller.signal,
     log: (m) => logger.info(m.trim()),
   });
   logger.info("Bulk CSV ingest finished", { ...result });
-  if (result.status === "failed") process.exitCode = 1;
+  if (result.status === "failed" || result.status === "would-fail") process.exitCode = 1;
 }
 
 main()

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
+import { denyUnless } from "@/lib/auth/require";
+import { logActivity } from "@/lib/activity";
 
 const bodySchema = z.object({
   name: z.string().trim().min(1).max(200),
@@ -18,6 +20,8 @@ const bodySchema = z.object({
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const denied = denyUnless(session, "crm.notes");
+  if (denied) return denied;
 
   const { id } = await params;
   const parsed = bodySchema.safeParse(await request.json().catch(() => ({})));
@@ -38,13 +42,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     },
   });
 
-  await db.activityLog.create({
-    data: {
-      userId: session.userId,
-      action: "director_contact_added",
-      meta: JSON.stringify({ companyId: id, name: parsed.data.name }),
-    },
-  });
+  await logActivity(session, "director_contact_added", { meta: { name: parsed.data.name }, companyId: id });
 
   // Same response shape the UI already consumed (it shows "manually added").
   return NextResponse.json({ director: { ...contact, manuallyAdded: true, appointedOn: null, resignedOn: null, nationality: null } });

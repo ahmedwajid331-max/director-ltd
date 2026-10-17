@@ -2,9 +2,9 @@
 
 :root {
   --background: #ffffff;
-  --foreground: #0f172a;
-  --brand: #4f46e5;
-  --brand-dark: #4338ca;
+  --foreground: #0a2260;
+  --brand: #1a56e8;
+  --brand-dark: #1445c2;
 }
 
 @theme inline {
@@ -12,6 +12,21 @@
   --color-foreground: var(--foreground);
   --color-brand: var(--brand);
   --color-brand-dark: var(--brand-dark);
+  /* Product palette: royal blue for actions and deep navy for headings/text (replaces Tailwind's indigo + slate-900),
+     so every screen shares the public landing page's blue/navy language. */
+  --color-indigo-50: #eef4ff;
+  --color-indigo-100: #dce8ff;
+  --color-indigo-200: #bcd2ff;
+  --color-indigo-300: #8fb3ff;
+  --color-indigo-400: #5a8bff;
+  --color-indigo-500: #2f6bff;
+  --color-indigo-600: #1a56e8;
+  --color-indigo-700: #1445c2;
+  --color-indigo-800: #123a9c;
+  --color-indigo-900: #0b2a6f;
+  --color-indigo-950: #081b4a;
+  --color-slate-900: #0a2260;
+  --color-slate-950: #061746;
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -26,8 +41,8 @@ body {
 }
 
 ::selection {
-  background: #c7d2fe;
-  color: #1e1b4b;
+  background: #bcd2ff;
+  color: #081b4a;
 }
 
 .focus-ring {
@@ -36,4 +51,16 @@ body {
 .focus-ring:focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: 2px;
+}
+
+/* Shared authenticated-app content column: header, nav and every page use this so edges align.
+   Centred, content capped at 1280px, fluid gutter (7.5vw, 16px-96px): ~96px per side at a 1280px
+   viewport (e.g. a 1920px screen at 150% scaling). */
+.app-container {
+  --app-gutter: clamp(1rem, 7.5vw, 6rem);
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(1280px + 2 * var(--app-gutter));
+  margin-inline: auto;
+  padding-inline: var(--app-gutter);
 }

@@ -1,4 +1,5 @@
-import { chRestGetWithRateInfo } from "./client";
+import { chRestGetWithRateInfo, CompaniesHouseApiError } from "./client";
+import type { QuotaClass } from "./quota";
 import { parseChDate } from "./csv/dates";
 
 export interface CompaniesHouseOfficer {
@@ -76,15 +77,25 @@ const MAX_PAGES = 100; // 10,000 officers: a safety stop, never hit by a real co
 
 // Reads EVERY page of a company's officers (the API defaults to 35 per page
 // and a large company - e.g. Tesco PLC, 74 officers - spans several).
-export async function fetchCompanyOfficers(companyNumber: string): Promise<CompaniesHouseOfficer[]> {
+//
+// A 200 response without an `items` array is a malformed answer, not "no
+// officers": it throws (retried later) rather than ever producing a confirmed
+// zero. A genuine empty list is `items: []`.
+export async function fetchCompanyOfficers(
+  companyNumber: string,
+  options: { quotaClass?: QuotaClass } = {}
+): Promise<CompaniesHouseOfficer[]> {
   const all: CompaniesHouseOfficer[] = [];
   let startIndex = 0;
   for (let page = 0; page < MAX_PAGES; page++) {
     const res = await chRestGetWithRateInfo<OfficerListResponse>(
       `/company/${encodeURIComponent(companyNumber)}/officers`,
-      { params: { items_per_page: PAGE_SIZE, start_index: startIndex } }
+      { params: { items_per_page: PAGE_SIZE, start_index: startIndex }, quotaClass: options.quotaClass }
     );
-    const items = res.items ?? [];
+    if (!Array.isArray(res?.items)) {
+      throw new CompaniesHouseApiError(`Companies House officers response for ${companyNumber} has no items list`, 502);
+    }
+    const items = res.items;
     all.push(...items);
     startIndex += items.length;
     const total = res.total_results ?? all.length;

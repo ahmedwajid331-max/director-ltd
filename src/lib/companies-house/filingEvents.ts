@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { syncCompanyProfile } from "./sync";
 import { CompaniesHouseNotFoundError, CompaniesHouseRateLimitError } from "./client";
+import type { QuotaClass } from "./quota";
 import { parseChDate } from "./csv/dates";
 
 // Filing types that change Company state. DS01 = application to strike the
@@ -44,7 +45,8 @@ export function parseFilingEvent(raw: unknown): ParsedFilingEvent | null {
     date: typeof data.date === "string" ? data.date : null,
     description: typeof data.description === "string" ? data.description : null,
     resourceUri: ev.resource_uri,
-    timepoint: typeof ev.event?.timepoint === "number" ? ev.event.timepoint : null,
+    // Only a real integer can be stored (BigInt(1.5) throws). Anything else is treated as "no timepoint", never as a crash.
+    timepoint: typeof ev.event?.timepoint === "number" && Number.isSafeInteger(ev.event.timepoint) ? ev.event.timepoint : null,
   };
 }
 
@@ -86,7 +88,7 @@ export async function persistFilingEvent(p: ParsedFilingEvent): Promise<{ status
 // yet its profile is fetched first; if Companies House cannot be reached
 // (rate limit etc.) the event stays `pending` with lastError and is retried
 // by reconcilePendingFilingEvents - it is never dropped.
-export async function applyFilingEvent(eventId: string): Promise<"applied" | "pending" | "ignored"> {
+export async function applyFilingEvent(eventId: string, quotaClass: QuotaClass = "filing"): Promise<"applied" | "pending" | "ignored"> {
   const event = await db.filingEvent.findUnique({ where: { id: eventId } });
   if (!event) return "ignored";
   if (event.applyStatus === "applied") return "applied";
@@ -95,7 +97,7 @@ export async function applyFilingEvent(eventId: string): Promise<"applied" | "pe
   try {
     let company = await db.company.findUnique({ where: { companyNumber: event.companyNumber } });
     if (!company) {
-      company = await syncCompanyProfile(event.companyNumber, "stream");
+      company = await syncCompanyProfile(event.companyNumber, "stream", { quotaClass });
     }
 
     const eventDate = parseChDate(event.date) ?? new Date(Date.UTC(event.processedAt.getUTCFullYear(), event.processedAt.getUTCMonth(), event.processedAt.getUTCDate()));

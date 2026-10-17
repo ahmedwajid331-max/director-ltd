@@ -25,7 +25,7 @@ test("CSV cells starting with = + - @ are neutralised; normal data is untouched"
 
 // ---- password policy -------------------------------------------------------------
 test("password policy rejects trivial passwords", () => {
-  for (const weak of ["12345678", "password", "Password123", "qwertyuiopas", "aaaaaaaaaaaa", "directorltd123", "short1!A"]) {
+  for (const weak of ["12345678", "password", "Password123", "qwertyuiopas", "aaaaaaaaaaaa", "directorltd123", "short1!"]) {
     assert.notEqual(validatePassword(weak), null, weak);
   }
   assert.notEqual(validatePassword("nick.smith-secure1", { email: "nick.smith@example.com" }), null); // contains email name

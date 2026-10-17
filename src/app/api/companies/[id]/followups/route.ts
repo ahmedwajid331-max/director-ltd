@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
+import { denyUnless } from "@/lib/auth/require";
+import { logActivity } from "@/lib/activity";
 import { syncFollowUpToCalendar } from "@/lib/calendar/sync-followup";
 import { isRealIsoDate } from "@/lib/filters/validate";
 
@@ -15,6 +17,8 @@ const bodySchema = z.object({
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const denied = denyUnless(session, "crm.notes");
+  if (denied) return denied;
 
   const { id } = await params;
   const parsed = bodySchema.safeParse(await request.json().catch(() => ({})));
@@ -40,6 +44,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   // Best-effort calendar sync - the follow-up above is already saved
   // regardless of whether this succeeds.
   await syncFollowUpToCalendar(followUp.id, session.userId);
+
+  await logActivity(session, "followup_created", { meta: { dueDate: parsed.data.dueDate }, companyId: id });
 
   return NextResponse.json({ followUp });
 }

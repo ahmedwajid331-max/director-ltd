@@ -7,7 +7,7 @@ const COMMON = [
   "directoradmin", "director", "changeme", "changeit", "trustno1", "sunshine",
 ];
 
-export const MIN_PASSWORD_LENGTH = 12;
+export const MIN_PASSWORD_LENGTH = 8;
 
 // Returns a human-readable reason the password is unacceptable, or null if OK.
 export function validatePassword(password: string, context: { email?: string } = {}): string | null {

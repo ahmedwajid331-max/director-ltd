@@ -1,9 +1,22 @@
 import { db } from "@/lib/db";
 import { CompaniesHouseRateLimitError, StreamOutOfRangeError, streamFilings } from "./client";
 import { applyFilingEvent, parseFilingEvent, persistFilingEvent, reconcilePendingFilingEvents, shouldStore } from "./filingEvents";
+import { handleOfficerFiling, isOfficerChangeFiling } from "./officerFreshness";
 import { finishRun, startRun, touchRun } from "@/lib/jobs/runs";
 
 const CHECKPOINT_NAME = "filings";
+// An event that makes processing throw is retried (the checkpoint has not moved past it) this many times. After that it is
+// skipped LOUDLY - counted in stats.failed, written to the run's errorSamples - so one bad event cannot stall the stream forever
+// while every later event waits behind it.
+export const POISON_AFTER = 3;
+
+// Raised only for a failure while PROCESSING one event (database rejected it, apply threw). Connection and transport errors come
+// from the stream iterator itself and are never charged against an event.
+class EventProcessingError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+  }
+}
 
 export interface StreamStats {
   connects: number;
@@ -15,7 +28,10 @@ export interface StreamStats {
   applied: number;
   pending: number;
   gaps: number;
+  failed: number; // events skipped after repeated processing failures (see POISON_AFTER); each is recorded in errorSamples
+  officerDirty: number;
   lastTimepoint: number | null;
+  lastPublishedAt?: string | null; // publish time of the newest event seen: how far the stream has caught up
 }
 
 export interface StreamWorkerOptions {
@@ -58,8 +74,11 @@ export async function runStreamWorker(options: StreamWorkerOptions = {}): Promis
   const log = options.onEvent ?? (() => {});
   const backoff = options.backoff ?? { initialMs: 1000, maxMs: 60_000 };
   const stats: StreamStats = {
-    connects: 0, reconnects: 0, eventsSeen: 0, malformed: 0, stored: 0, duplicates: 0, applied: 0, pending: 0, gaps: 0, lastTimepoint: null,
+    connects: 0, reconnects: 0, eventsSeen: 0, malformed: 0, stored: 0, duplicates: 0, applied: 0, pending: 0, gaps: 0, failed: 0, officerDirty: 0, lastTimepoint: null,
   };
+  const errorSamples: { timepoint: number; error: string }[] = [];
+  const attempts = new Map<number, number>();
+  let current: number | null = null; // timepoint of the event being processed (for failure attribution)
 
   const run = await startRun("stream");
   const started = Date.now();
@@ -92,26 +111,41 @@ export async function runStreamWorker(options: StreamWorkerOptions = {}): Promis
 
         for await (const { event: raw, timepoint } of streamFilings({ signal: runtime.signal, timepoint: checkpoint, idleTimeoutMs: options.idleTimeoutMs })) {
           gotEvent = true;
+          current = timepoint;
           delay = backoff.initialMs; // healthy connection: reset backoff
           stats.eventsSeen++;
+          const published = (raw as { event?: { published_at?: unknown } } | null)?.event?.published_at;
+          if (typeof published === "string" && !Number.isNaN(Date.parse(published + (/[zZ]|[+-]\d\d:?\d\d$/.test(published) ? "" : "Z")))) stats.lastPublishedAt = published;
 
           const parsed = parseFilingEvent(raw);
+          // Officer filings mark the company's confirmed officer data dirty and
+          // queue a refresh (local database only - no Companies House call here).
+          if (parsed && isOfficerChangeFiling(parsed.type)) {
+            try {
+              if ((await handleOfficerFiling(parsed.companyNumber, parsed.type)) === "marked_dirty") stats.officerDirty++;
+            } catch (err) {
+              log(`officer filing ${parsed.type} for ${parsed.companyNumber} not applied: ${err instanceof Error ? err.message : err}`);
+            }
+          }
+
           if (!parsed) {
             stats.malformed++;
           } else if (shouldStore(parsed.type)) {
-            const { status, id } = await persistFilingEvent(parsed);
+            const { status, id } = await persistFilingEvent(parsed).catch((e) => {
+              throw new EventProcessingError(e);
+            });
             if (status === "duplicate") stats.duplicates++;
             else stats.stored++;
             if (status === "created" || parsed.type === "DS01" || parsed.type === "DS02") {
               try {
-                const res = await applyFilingEvent(id);
+                const res = await applyFilingEvent(id, "stream");
                 if (res === "applied") {
                   stats.applied++;
                   if (status === "created") log(`${parsed.type} filing applied: ${parsed.companyNumber}`);
                 } else stats.pending++;
               } catch (err) {
                 if (err instanceof CompaniesHouseRateLimitError) stats.pending++;
-                else throw err;
+                else throw new EventProcessingError(err);
               }
             }
           }
@@ -153,6 +187,20 @@ export async function runStreamWorker(options: StreamWorkerOptions = {}): Promis
           continue;
         }
         const message = err instanceof Error ? err.message : String(err);
+        // A failure while processing one event: count it against that event.
+        if (err instanceof EventProcessingError && current !== null) {
+          const n = (attempts.get(current) ?? 0) + 1;
+          attempts.set(current, n);
+          if (n >= POISON_AFTER) {
+            stats.failed++;
+            if (errorSamples.length < 20) errorSamples.push({ timepoint: current, error: message.slice(0, 300) });
+            log(`Event at timepoint ${current} failed ${n} times and is skipped: ${message}`);
+            await saveCheckpoint(current + 1).catch(() => {});
+            attempts.delete(current);
+            current = null;
+            continue;
+          }
+        }
         // Bad credentials are not transient - stop instead of hammering the API.
         if (/HTTP 40[13]/.test(message)) {
           fatal = err;
@@ -175,7 +223,7 @@ export async function runStreamWorker(options: StreamWorkerOptions = {}): Promis
     if (runtimeTimer) clearTimeout(runtimeTimer);
   }
 
-  const patch = { rowsRead: stats.eventsSeen, rowsProcessed: stats.applied, rowsFailed: stats.malformed, statsJson: JSON.stringify(stats) };
+  const patch = { rowsRead: stats.eventsSeen, rowsProcessed: stats.applied, rowsFailed: stats.malformed + stats.failed, statsJson: JSON.stringify(stats), ...(errorSamples.length ? { errorSamples: JSON.stringify(errorSamples) } : {}) };
   if (fatal) {
     await finishRun(run.id, "failed", { ...patch, errorMessage: fatal instanceof Error ? fatal.message : String(fatal) });
     throw fatal;

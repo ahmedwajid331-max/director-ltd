@@ -10,6 +10,8 @@ after(async () => {
 test("an Admin can NOT deactivate or demote a Super Admin (server-side)", async () => {
   const admin = await sessionFor("ADMIN");
   const sa = await createUser("SUPER_ADMIN");
+  // Even when the Super Admin is (oddly) in the Admin's team, the role rule refuses every change.
+  await db.user.update({ where: { id: sa.id }, data: { managerId: admin.userId } });
   const r1 = await api(admin, `/api/users/${sa.id}`, { method: "PATCH", body: { active: false } });
   assert.equal(r1.status, 403);
   const r2 = await api(admin, `/api/users/${sa.id}`, { method: "PATCH", body: { role: "USER" } });
@@ -19,14 +21,23 @@ test("an Admin can NOT deactivate or demote a Super Admin (server-side)", async 
   const after = await db.user.findUniqueOrThrow({ where: { id: sa.id } });
   assert.equal(after.role, "SUPER_ADMIN");
   assert.equal(after.active, true);
+
+  // A Super Admin outside the Admin's team is not even visible to them.
+  const outside = await createUser("SUPER_ADMIN");
+  assert.equal((await api(admin, `/api/users/${outside.id}`, { method: "PATCH", body: { active: false } })).status, 404);
+  assert.equal((await db.user.findUniqueOrThrow({ where: { id: outside.id } })).active, true);
 });
 
-test("an Admin can not modify another Admin or change any role, but can deactivate a plain User", async () => {
+test("an Admin can not modify another Admin or change any role, but can deactivate a plain User in their team", async () => {
   const admin = await sessionFor("ADMIN");
   const otherAdmin = await createUser("ADMIN");
   const user = await createUser("USER");
+  const stranger = await createUser("USER");
+  await db.user.updateMany({ where: { id: { in: [otherAdmin.id, user.id] } }, data: { managerId: admin.userId } });
   assert.equal((await api(admin, `/api/users/${otherAdmin.id}`, { method: "PATCH", body: { active: false } })).status, 403);
   assert.equal((await api(admin, `/api/users/${user.id}`, { method: "PATCH", body: { role: "ADMIN" } })).status, 403);
+  assert.equal((await api(admin, `/api/users/${stranger.id}`, { method: "PATCH", body: { active: false } })).status, 404, "a user outside the team is out of scope");
+  assert.equal((await db.user.findUniqueOrThrow({ where: { id: stranger.id } })).active, true);
   assert.equal((await api(admin, `/api/users/${user.id}`, { method: "PATCH", body: { active: false } })).status, 200);
   assert.equal((await db.user.findUniqueOrThrow({ where: { id: user.id } })).active, false);
 });
@@ -142,7 +153,7 @@ test("unknown email and wrong password give the identical response", async () =>
 // ---- Password policy ---------------------------------------------------------------------
 test("user creation enforces the password policy", async () => {
   const admin = await sessionFor("ADMIN");
-  for (const pw of ["12345678", "password", "Password123", "short1!A"]) {
+  for (const pw of ["12345678", "password", "Password123", "short1!"]) {
     const r = await api(admin, "/api/users", { body: { name: "W", email: `w.${Date.now()}.${pw.length}@test.example`, password: pw, role: "USER" } });
     assert.equal(r.status, 400, pw);
   }

@@ -319,3 +319,40 @@ test("officer sync is atomic: a failure part-way leaves the previous officers in
   assert.equal(after.directorCount, 3);
   assert.equal(after.officersCoverage, "none");
 });
+
+test("stream worker: one event that cannot be processed is retried, then skipped loudly - later events are not lost and the checkpoint moves on", async () => {
+  const { runStreamWorker, loadCheckpoint, POISON_AFTER } = await import("../../src/lib/companies-house/streamWorker");
+  await db.streamCheckpoint.deleteMany();
+  const tag = String(Date.now() % 100000).padStart(5, "0");
+  const A = await makeCompany({ companyNumber: `PA${tag}`.toUpperCase() });
+  const B = await makeCompany({ companyNumber: `PB${tag}`.toUpperCase() });
+  // A NUL character is valid JSON but PostgreSQL refuses to store it: the database rejects this event every time.
+  const poison = JSON.stringify({
+    resource_uri: `/company/${A.companyNumber}/filing-history/bad`,
+    data: { transaction_id: "bad\u0000tx", type: "DS01", date: "2026-09-30" },
+    event: { timepoint: 701 },
+  }) + "\n";
+
+  streamScript = (req, res) => {
+    const from = Number(new URL(req.url!, "http://x").searchParams.get("timepoint") ?? 0);
+    res.writeHead(200, { "content-type": "application/json" });
+    if (from <= 700) res.write(ev(700, A.companyNumber, "DS01", `p0-${tag}`));
+    if (from <= 701) res.write(poison);
+    if (from <= 702) res.write(ev(702, B.companyNumber, "DS01", `p2-${tag}`));
+    setTimeout(() => res.socket?.destroy(), 100);
+  };
+
+  const logs: string[] = [];
+  const stats = await runStreamWorker({ maxRuntimeMs: 8000, idleTimeoutMs: 700, backoff: { initialMs: 20, maxMs: 40 }, onEvent: (m) => logs.push(m) });
+
+  assert.equal(stats.failed, 1, "the bad event is counted, not silently dropped");
+  assert.ok(logs.some((l) => /timepoint 701 failed/.test(l)), "and logged");
+  assert.ok(POISON_AFTER >= 2, "it is retried before being given up on");
+  assert.equal((await db.company.findUniqueOrThrow({ where: { id: A.id } })).hasDS01, true, "the event before it was applied");
+  assert.equal((await db.company.findUniqueOrThrow({ where: { id: B.id } })).hasDS01, true, "the event after it was NOT lost");
+  assert.ok((await loadCheckpoint())! >= 702, "the checkpoint moved past the bad event");
+  const run = await db.ingestionRun.findFirstOrThrow({ where: { kind: "stream" }, orderBy: { startedAt: "desc" } });
+  assert.equal(run.status, "success".length ? run.status : "", "the run closed (it did not crash)");
+  assert.ok(run.rowsFailed >= 1, "the run records the failure");
+  assert.match(run.errorSamples ?? "", /701/);
+});

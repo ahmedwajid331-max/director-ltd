@@ -1,23 +1,41 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Download, Printer, Share2, Check } from "lucide-react";
-import { Button } from "@/components/ui/Button";
 import { Pagination } from "@/components/ui/Pagination";
 import { ResultsTable, type CompanyRow } from "@/components/companies/ResultsTable";
+import { OfficerCoverageNotice, type OfficerCoverageSummary } from "@/components/companies/OfficerCoverageNotice";
 import type { SortableField } from "@/lib/data/companies";
 import type { FilterGroupNode } from "@/lib/filters/types";
+import { ReportActionMenus } from "./ReportActionMenus";
 
-export function ReportResultsClient({ reportId, filter }: { reportId: string; filter: FilterGroupNode }) {
+export function ReportResultsClient({
+  reportId,
+  reportName,
+  filter,
+  columns,
+  initialSort,
+  canShare,
+  canCsv,
+  canDocs,
+}: {
+  reportId: string;
+  reportName: string;
+  filter: FilterGroupNode;
+  // The columns and sort this report remembered. null = saved before they were remembered: the original table.
+  columns?: string[] | null;
+  initialSort?: { field: SortableField; dir: "asc" | "desc" } | null;
+  canShare?: boolean;
+  canCsv?: boolean;
+  canDocs?: boolean;
+}) {
   const [page, setPage] = useState(1);
-  const [sortField, setSortField] = useState<SortableField>("name");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [sortField, setSortField] = useState<SortableField>(initialSort?.field ?? "name");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">(initialSort?.dir ?? "asc");
   const [rows, setRows] = useState<CompanyRow[]>([]);
   const [total, setTotal] = useState(0);
+  const [coverage, setCoverage] = useState<OfficerCoverageSummary | null>(null);
   const [pageCount, setPageCount] = useState(1);
   const [loading, setLoading] = useState(true);
-  const [exporting, setExporting] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -28,6 +46,7 @@ export function ReportResultsClient({ reportId, filter }: { reportId: string; fi
       const data = await res.json();
       setRows(data.rows ?? []);
       setTotal(data.total ?? 0);
+      setCoverage(data.officerCoverage ?? null);
       setPageCount(data.pageCount ?? 1);
     } finally {
       setLoading(false);
@@ -39,11 +58,11 @@ export function ReportResultsClient({ reportId, filter }: { reportId: string; fi
     load();
   }, [load]);
 
-  function handleSort(field: SortableField) {
+  function handleSort(field: SortableField, dir?: "asc" | "desc") {
     if (field === sortField) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     else {
       setSortField(field);
-      setSortDir("asc");
+      setSortDir(dir ?? "asc");
     }
   }
 
@@ -65,51 +84,27 @@ export function ReportResultsClient({ reportId, filter }: { reportId: string; fi
     });
   }
 
-  async function handleExport() {
-    setExporting(true);
-    try {
-      const res = await fetch("/api/companies/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filter }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        window.alert(data.error ?? "Export failed.");
-        return;
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `report-${reportId}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } finally {
-      setExporting(false);
-    }
-  }
-
-  function handleShare() {
-    navigator.clipboard.writeText(window.location.href);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  async function toggleFlag(id: string, key: "saved" | "redFlagged", next: boolean) {
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [key]: next } : r)));
+    const res = await fetch(`/api/companies/${id}/state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [key]: next }),
+    }).catch(() => null);
+    if (!res || !res.ok) setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [key]: !next } : r)));
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap justify-end gap-2 print:hidden">
-        <Button variant="outline" size="sm" onClick={handleShare} title="Copies this report's link. It opens only for signed-in users who are allowed to see this report (its owner and admins).">
-          {copied ? <Check className="h-4 w-4" /> : <Share2 className="h-4 w-4" />}
-          {copied ? "Link copied" : "Share"}
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => window.print()} title="Prints the rows currently on screen (this page of results). Use Export CSV for the whole report.">
-          <Printer className="h-4 w-4" /> Print
-        </Button>
-        <Button variant="outline" size="sm" onClick={handleExport} disabled={exporting}>
-          <Download className="h-4 w-4" /> {exporting ? "Exporting…" : "Export CSV"}
-        </Button>
+      <div className="flex justify-end">
+        <ReportActionMenus reportId={reportId} reportName={reportName} filter={filter} columns={columns} sortField={sortField} sortDir={sortDir} total={loading ? null : total} canShare={canShare} canCsv={canCsv} canDocs={canDocs} />
       </div>
+
+      <p className="text-sm text-slate-600">
+        <span className="text-base font-semibold text-slate-900">{total.toLocaleString()}</span> {total === 1 ? "company" : "companies"} in this report
+      </p>
+
+      <OfficerCoverageNotice summary={coverage} request={{ reportId }} />
 
       <ResultsTable
         rows={rows}
@@ -119,7 +114,11 @@ export function ReportResultsClient({ reportId, filter }: { reportId: string; fi
         onSort={handleSort}
         onToggleFollow={toggleFollow}
         onToggleTrash={toggleTrash}
+        onToggleSaved={(id, next) => toggleFlag(id, "saved", next)}
+        onToggleRedFlag={(id, next) => toggleFlag(id, "redFlagged", next)}
+        startIndex={(page - 1) * 25}
         scope="all"
+        columns={columns ?? undefined}
       />
 
       <div className="print:hidden">

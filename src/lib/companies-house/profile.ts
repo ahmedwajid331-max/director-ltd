@@ -1,4 +1,5 @@
 import { chRestGetWithRateInfo } from "./client";
+import type { QuotaClass } from "./quota";
 import { parseChDate } from "./csv/dates";
 
 // Shape of the real GET /company/{number} response - only the fields we
@@ -35,10 +36,11 @@ export interface CompaniesHouseProfile {
     overdue?: boolean;
   };
   sic_codes?: string[];
+  links?: { officers?: string };
 }
 
-export async function fetchCompanyProfile(companyNumber: string): Promise<CompaniesHouseProfile> {
-  return chRestGetWithRateInfo<CompaniesHouseProfile>(`/company/${encodeURIComponent(companyNumber)}`);
+export async function fetchCompanyProfile(companyNumber: string, options: { quotaClass?: QuotaClass } = {}): Promise<CompaniesHouseProfile> {
+  return chRestGetWithRateInfo<CompaniesHouseProfile>(`/company/${encodeURIComponent(companyNumber)}`, { quotaClass: options.quotaClass });
 }
 
 export const STRIKE_OFF_STATUS_DETAIL = "active-proposal-to-strike-off";

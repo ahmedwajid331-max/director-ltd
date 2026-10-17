@@ -2,10 +2,11 @@
 //
 //   1. python scratchpad/expected.py   -> tmp-ingest/expected-100k.jsonl (+ aggregate counts), computed
 //      independently of this code base from the same sample file
-//   2. DATABASE_URL=<empty scratch db> npx tsx tests/acceptance/ingest-100k.ts tmp-ingest/sample-100k.zip
+//   2. DATABASE_URL=<empty local db whose name contains "scratch" or "test", e.g. director_scratch_100k> npx tsx tests/acceptance/ingest-100k.ts tmp-ingest/sample-100k.zip
 //
 // Steps: interrupt mid-run -> resume -> rerun the whole file (must add 0 rows) -> field-by-field
 // verification against the independent expectation -> filter counts vs expected -> query timings.
+import "../support/require-scratch-db"; // must stay first: refuses to run unless DATABASE_URL is an isolated scratch/test database
 import fs from "node:fs";
 import readline from "node:readline";
 import { PrismaClient } from "@prisma/client";

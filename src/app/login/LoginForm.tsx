@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { Input, Label } from "@/components/ui/Input";
+import { PasswordInput } from "@/components/ui/PasswordInput";
 import { Button } from "@/components/ui/Button";
 
 export function LoginForm() {
@@ -59,8 +60,7 @@ export function LoginForm() {
       </div>
       <div>
         <Label>Password</Label>
-        <Input
-          type="password"
+        <PasswordInput
           required
           autoComplete="current-password"
           value={password}

@@ -18,14 +18,24 @@ datasource db {
 // would make every new CH value a migration).
 
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  name         String
-  passwordHash String
-  role         String    @default("USER")
-  active       Boolean   @default(true)
-  createdAt    DateTime  @default(now())
-  lastLoginAt  DateTime?
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String
+  passwordHash    String
+  role            String    @default("USER")
+  active          Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  lastLoginAt     DateTime?
+  // Granular permissions: JSON array of permission keys (src/lib/auth/permissions.ts). NULL = the role's default set,
+  // so accounts that existed before permissions keep exactly the access they had.
+  permissions     String?
+  // Supervisor (an ADMIN or SUPER_ADMIN) whose team this user belongs to; scopes what a supervisor may see.
+  managerId       String?
+  manager         User?     @relation("Team", fields: [managerId], references: [id], onDelete: SetNull)
+  team            User[]    @relation("Team")
+  // Configured pay rate for approved timesheet hours, in minor units (pence/cents) of rateCurrency. NULL = not set.
+  hourlyRateMinor Int?
+  rateCurrency    String    @default("GBP")
 
   reports             Report[]
   companyStates       UserCompanyState[]
@@ -33,6 +43,97 @@ model User {
   followUps           FollowUp[]
   calendarConnections CalendarConnection[]
   crmContacts         CrmContact[]
+  recentlyViewed      RecentlyViewed[]
+  columnPreference    UserColumnPreference?
+  sessions            UserSession[]
+  contactLogs         ContactLog[]
+  assignmentsReceived Assignment[]          @relation("AssignmentAssignee")
+  assignmentsGiven    Assignment[]          @relation("AssignmentAssigner")
+  timesheets          Timesheet[]           @relation("TimesheetOwner")
+  timesheetsReviewed  Timesheet[]           @relation("TimesheetReviewer")
+
+  @@index([managerId])
+}
+
+// One row per sign-in. endedAt is set ONLY by an explicit logout (or an administrator ending the session): a closed
+// browser leaves it NULL, and the UI then reports the session as unresolved rather than inventing a logout time.
+// lastActivityAt moves forward (throttled) whenever the signed-in user makes an authenticated request.
+model UserSession {
+  id             String    @id @default(cuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  startedAt      DateTime  @default(now())
+  lastActivityAt DateTime  @default(now())
+  endedAt        DateTime?
+  endReason      String? // logout | deactivated | admin_ended
+  userAgent      String?
+
+  @@index([userId, startedAt])
+  @@index([startedAt])
+}
+
+// A real contact with (or about) a company, recorded by staff. Only these rows count as "contacted" - opening or
+// searching a company never does.
+model ContactLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  channel   String // call | email | meeting | other
+  outcome   String // reached | no_answer | left_message | callback_requested | not_interested | other
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([companyId])
+}
+
+// Work a supervisor allocates to a staff member. Companies stay the single shared Company record; this only points at it.
+// History (created / reassigned / completed / cancelled) is written to ActivityLog.
+model Assignment {
+  id           String    @id @default(cuid())
+  companyId    String
+  company      Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assigneeId   String
+  assignee     User      @relation("AssignmentAssignee", fields: [assigneeId], references: [id], onDelete: Cascade)
+  assignedById String
+  assignedBy   User      @relation("AssignmentAssigner", fields: [assignedById], references: [id], onDelete: Cascade)
+  status       String    @default("open") // open | done | cancelled
+  dueDate      DateTime? @db.Date
+  note         String?
+  createdAt    DateTime  @default(now())
+  completedAt  DateTime?
+
+  @@index([assigneeId, status])
+  @@index([assignedById])
+  @@index([companyId])
+}
+
+// Staff-submitted hours for one work day. Three different numbers are kept apart on purpose:
+// submittedMinutes (what the staff member says), recorded sessions (computed from UserSession, never stored here), and
+// approvedMinutes (what a supervisor approved - the ONLY figure pay may be based on). Never auto-approved.
+model Timesheet {
+  id                     String    @id @default(cuid())
+  userId                 String
+  user                   User      @relation("TimesheetOwner", fields: [userId], references: [id], onDelete: Cascade)
+  workDate               DateTime  @db.Date
+  submittedMinutes       Int
+  note                   String?
+  status                 String    @default("submitted") // submitted | approved | rejected
+  approvedMinutes        Int?
+  reviewedById           String?
+  reviewedBy             User?     @relation("TimesheetReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt             DateTime?
+  reviewNote             String?
+  // Rate captured at approval so later rate changes never rewrite history.
+  rateMinorAtApproval    Int?
+  rateCurrencyAtApproval String?
+  createdAt              DateTime  @default(now())
+
+  @@unique([userId, workDate])
+  @@index([status])
+  @@index([workDate])
 }
 
 // Login throttling state, stored in the database so it is shared across
@@ -47,11 +148,11 @@ model LoginAttempt {
 }
 
 model Company {
-  id            String   @id @default(cuid())
-  companyNumber String   @unique
-  name          String
-  status        String
-  type          String
+  id                String    @id @default(cuid())
+  companyNumber     String    @unique
+  name              String
+  status            String
+  type              String
   incorporationDate DateTime  @db.Date
   dissolutionDate   DateTime? @db.Date
   dormant           Boolean   @default(false)
@@ -63,12 +164,12 @@ model Company {
   registeredPostcode String
   registeredCounty   String?
 
-  accountsNextDue     DateTime? @db.Date
-  accountsLastMadeUp  DateTime? @db.Date
-  accountsOverdue     Boolean   @default(false)
-  confirmationNextDue DateTime? @db.Date
+  accountsNextDue        DateTime? @db.Date
+  accountsLastMadeUp     DateTime? @db.Date
+  accountsOverdue        Boolean   @default(false)
+  confirmationNextDue    DateTime? @db.Date
   confirmationLastMadeUp DateTime? @db.Date
-  confirmationOverdue Boolean   @default(false)
+  confirmationOverdue    Boolean   @default(false)
 
   // DS01 = application to strike the company off. hasDS01 is true when a DS01
   // filing event has been seen on the stream (ds01FiledAt) OR the register
@@ -77,8 +178,8 @@ model Company {
   // re-import can never erase it.
   hasDS01        Boolean   @default(false)
   ds01FiledAt    DateTime? @db.Date
-  directorCount  Int     @default(0)
-  singleDirector Boolean @default(false)
+  directorCount  Int       @default(0)
+  singleDirector Boolean   @default(false)
 
   // Real Companies House integration metadata. "statusDetail" carries the
   // granular company_status_detail value (e.g. active-proposal-to-strike-off)
@@ -86,12 +187,21 @@ model Company {
   // accounts.last_accounts.type value dormant is derived from. "source"
   // tracks provenance (seed | bulk_import | advanced_search | stream | rest_enrichment) so
   // synthetic dev rows are never confused with real ingested data.
-  statusDetail       String?
-  accountType        String?
-  source             String    @default("seed")
-  chLastFetchedAt    DateTime?
-  officersCoverage   String    @default("none") // none | partial | full
-  officersFetchedAt  DateTime?
+  statusDetail              String?
+  accountType               String?
+  source                    String    @default("seed")
+  chLastFetchedAt           DateTime?
+  // Officer DATA state (what we know), never queue state (see OfficerSyncJob):
+  //   none        - officers never fetched; directorCount/singleDirector are placeholders
+  //   full        - every officer page fetched; directorCount/singleDirector are confirmed
+  //   unavailable - Companies House has no officer data for this company
+  //                 (officersUnavailableReason: no_officer_resource | company_gone)
+  // Staleness is derived, not stored: officersFetchedAt too old, or
+  // officersDirtyAt (an officer filing was seen) newer than officersFetchedAt.
+  officersCoverage          String    @default("none") // none | full | unavailable
+  officersFetchedAt         DateTime?
+  officersDirtyAt           DateTime?
+  officersUnavailableReason String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -99,16 +209,22 @@ model Company {
   directors    Director[]
   crmContacts  CrmContact[]
   userStates   UserCompanyState[]
+  contactLogs  ContactLog[]
+  assignments  Assignment[]
+  recentViews  RecentlyViewed[]
   filingEvents FilingEvent[]
+  officerJob   OfficerSyncJob?
+  // Low-cardinality booleans use partial indexes + trigram (name) created in
+  // the migration SQL (Prisma cannot express them). The officer-coverage
+  // indexes (crawl, dirty, full/unavailable freshness, directorCount and
+  // singleDirector for confirmed rows) are partial indexes there too.
 
   @@index([status])
   @@index([type])
   @@index([registeredPostcode])
+  @@index([registeredCity])
   @@index([incorporationDate])
-  @@index([directorCount])
   @@index([source])
-  // Low-cardinality booleans use partial indexes + trigram (name) created in
-  // the migration SQL (Prisma cannot express them).
 }
 
 model Director {
@@ -128,7 +244,7 @@ model Director {
   officerId String?
   source    String  @default("seed") // seed | rest
 
-  createdAt   DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@index([companyId])
   @@index([officerId])
@@ -222,15 +338,18 @@ model IngestionRun {
 }
 
 model UserCompanyState {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  companyId String
-  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  followed  Boolean  @default(false)
-  trashed   Boolean  @default(false)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  followed   Boolean  @default(false)
+  trashed    Boolean  @default(false)
+  // Private, independent of followed / trashed (a company can be any combination).
+  saved      Boolean  @default(false)
+  redFlagged Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   notes     Note[]
   followUps FollowUp[]
@@ -238,6 +357,21 @@ model UserCompanyState {
   @@unique([userId, companyId])
   @@index([userId, followed])
   @@index([userId, trashed])
+  @@index([userId, saved])
+  @@index([userId, redFlagged])
+}
+
+// Companies a user has opened, newest first. One row per (user, company): viewing again only moves viewedAt.
+model RecentlyViewed {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  viewedAt  DateTime @default(now())
+
+  @@unique([userId, companyId])
+  @@index([userId, viewedAt])
 }
 
 model Note {
@@ -269,11 +403,11 @@ model FollowUp {
 }
 
 model CalendarConnection {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  provider  String // GOOGLE | MICROSOFT | INTERNAL
-  status    String   @default("DISCONNECTED") // CONNECTED | DISCONNECTED | ERROR
+  id           String  @id @default(cuid())
+  userId       String
+  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider     String // GOOGLE | MICROSOFT | INTERNAL
+  status       String  @default("DISCONNECTED") // CONNECTED | DISCONNECTED | ERROR
   accountEmail String?
   calendarId   String?
 
@@ -309,20 +443,25 @@ model CalendarEvent {
 }
 
 model Report {
-  id           String    @id @default(cuid())
-  ownerId      String
-  owner        User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  name         String
-  description  String?
-  filterJson   String
-  columnsJson  String?
-  sortJson     String?
-  dailyRefresh Boolean   @default(true)
-  lastRunAt    DateTime?
-  lastRefreshError String?
-  resultCount  Int       @default(0)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id                String    @id @default(cuid())
+  ownerId           String
+  owner             User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name              String
+  description       String?
+  filterJson        String
+  columnsJson       String?
+  sortJson          String?
+  dailyRefresh      Boolean   @default(true)
+  // When the results were last computed, by ANY route: creation, edit, manual Refresh, or the daily job.
+  lastRunAt         DateTime?
+  // When the scheduled daily job last SUCCESSFULLY refreshed THIS report. Written only by that job: never by creation,
+  // editing, a manual refresh or any other recomputation, and never advanced by a failed refresh. NULL = the daily job
+  // has not refreshed it yet (for example a report created since the job last ran).
+  lastAutoRefreshAt DateTime?
+  lastRefreshError  String?
+  resultCount       Int       @default(0)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   @@index([ownerId])
 }
@@ -334,8 +473,202 @@ model ActivityLog {
   action    String
   meta      String?
   createdAt DateTime @default(now())
+  // Optional links so "what did this person do in this session / on this company / report" is a cheap indexed query.
+  // Plain ids (no foreign keys) so the log survives deletion of the thing it describes.
+  sessionId String?
+  companyId String?
+  reportId  String?
 
   @@index([userId, createdAt])
+  @@index([userId, action, createdAt])
   @@index([action])
   @@index([createdAt])
+  @@index([sessionId])
+  @@index([companyId])
+  @@index([reportId])
+}
+
+// ---------------------------------------------------------------------------
+// Officer coverage pipeline (see src/lib/companies-house/officerQueue.ts).
+// ---------------------------------------------------------------------------
+
+// Companies that need officer attention, with their retry state. Only
+// prioritised/failed work lives here - the general P5 background crawl walks
+// the Company table with OfficerCrawlCursor instead of materialising rows for
+// the whole register. One row per company (idempotent enqueue); a successful
+// sync deletes the row.
+//   priority: 0 viewing now (inline, never queued) .. 1 saved reports ..
+//             2 followed .. 3 ad-hoc director filter .. 4 stale/dirty refresh .. 5 crawl
+//   status:   queued | leased | retry | parked
+model OfficerSyncJob {
+  companyId      String    @id
+  company        Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  priority       Int
+  reason         String
+  status         String    @default("queued")
+  attempts       Int       @default(0)
+  enqueuedAt     DateTime  @default(now())
+  lastAttemptAt  DateTime?
+  nextAttemptAt  DateTime  @default(now())
+  lastHttpStatus Int?
+  lastError      String?
+  leasedBy       String?
+  leaseUntil     DateTime?
+  parkedAt       DateTime?
+  updatedAt      DateTime  @updatedAt
+  // Claim / lease / parked indexes are partial indexes in the migration SQL.
+}
+
+// Persistent keyset cursor for the background crawl (never OFFSET).
+// phase "active" walks active companies first, then "other".
+model OfficerCrawlCursor {
+  name      String   @id // "officers"
+  phase     String   @default("active")
+  lastId    String?
+  passes    Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+// Shared Companies House REST quota (one row, id "rest"). Every process
+// reserves a request here before calling the API, so the 600 requests / 5
+// minutes budget is honoured across the web app, stream worker and officer
+// worker. Header values (X-Ratelimit-*) are authoritative when present.
+model ChQuotaState {
+  id                    String    @id
+  windowStartedAt       DateTime
+  windowEndsAt          DateTime
+  usedUser              Int       @default(0)
+  usedFiling            Int       @default(0)
+  usedStream            Int       @default(0)
+  usedRefresh           Int       @default(0)
+  usedBackfill          Int       @default(0)
+  headerRemaining       Int?
+  headerResetAt         DateTime?
+  cooldownUntil         DateTime? // global, set by HTTP 429
+  backgroundPausedUntil DateTime? // refresh/backfill stay paused a little longer than everyone else
+  last429At             DateTime?
+  // Last time each class asked for quota. A class with recent demand keeps its
+  // full per-window reservation; an idle class only keeps a small floor.
+  demandUserAt          DateTime?
+  demandFilingAt        DateTime?
+  demandStreamAt        DateTime?
+  demandRefreshAt       DateTime?
+  updatedAt             DateTime  @updatedAt
+}
+
+// Append-only quota diagnostics: one row per internal quota denial or real HTTP
+// 429 (never per granted request). Distinguishes "our own gate said wait" from
+// "Companies House said 429". Pruned automatically (~14 days).
+model ChQuotaEvent {
+  id              String    @id @default(cuid())
+  at              DateTime  @default(now())
+  kind            String // quota_denied (internal gate) | http_429 (Companies House)
+  quotaClass      String
+  reason          String // quota | paced | cooldown | background_paused | http_429
+  internal        Boolean
+  httpStatus      Int?
+  waitMs          Int?
+  usedTotal       Int?
+  usedClass       Int?
+  headerRemaining Int?
+  windowStartedAt DateTime?
+  windowEndsAt    DateTime?
+  headerResetAt   DateTime?
+
+  @@index([at])
+}
+
+// Persistent circuit breakers. "auth": repeated 401/403 (bad key) stops all
+// REST traffic until reset or a half-open probe succeeds. "outage": a run of
+// 5xx/network failures pauses background (refresh/backfill) work only.
+model ChBreaker {
+  name                String    @id // auth | outage
+  state               String    @default("closed") // closed | open | half_open
+  consecutiveFailures Int       @default(0)
+  trips               Int       @default(0)
+  openedAt            DateTime?
+  openUntil           DateTime?
+  reason              String?
+  lastStatus          Int?
+  windowTotal         Int       @default(0)
+  windowFailures      Int       @default(0)
+  probeStartedAt      DateTime?
+  updatedAt           DateTime  @updatedAt
+}
+
+// Hourly request outcome counters per quota class (admin observability).
+model ChRequestStat {
+  bucketStart   DateTime
+  quotaClass    String
+  requests      Int      @default(0)
+  ok            Int      @default(0)
+  status404     Int      @default(0)
+  status429     Int      @default(0)
+  statusAuth    Int      @default(0) // 401 / 403
+  status5xx     Int      @default(0)
+  networkErrors Int      @default(0)
+
+  @@id([bucketStart, quotaClass])
+  @@index([bucketStart])
+}
+
+// Audit ledger for the monthly bulk importer: one row per source row that was
+// NOT imported cleanly. "permanent" rows are rejected by validation (bad date,
+// missing name, ...) or superseded by a later duplicate in the same file;
+// "retriable" rows failed in the database and carry the raw CSV record so
+// `ch:bulk-ingest --retry-failed <runId>` can try them again. Written in the
+// same transaction as the run's checkpoint, so a row can never be both
+// "passed over" and missing from this table. No foreign keys: Company / CRM
+// tables are never touched by it.
+model IngestRowFailure {
+  id            String    @id @default(cuid())
+  runId         String
+  rowNumber     Int // 1-based data row position in the source file
+  companyNumber String?
+  kind          String // rejected | duplicate_in_file | db_failure
+  reason        String
+  retryState    String // permanent | retriable | resolved
+  attempts      Int       @default(0)
+  rawJson       String? // the CSV record (truncated), kept for retriable rows
+  createdAt     DateTime  @default(now())
+  resolvedAt    DateTime?
+
+  @@unique([runId, rowNumber])
+  @@index([runId, retryState])
+  @@index([companyNumber])
+}
+
+// ---- Column & Default Settings -------------------------------------------------------------------------------
+// Which catalogue fields users may display. Only switches an administrator has explicitly flipped are stored;
+// every other field takes its catalogue default (see src/lib/columns/catalogue.ts).
+model ColumnFieldSetting {
+  key         String   @id
+  enabled     Boolean
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+}
+
+// Recommended layouts. Exactly one is the default (a partial unique index in the migration enforces it).
+// `version` increases whenever the column list changes, so users with their own saved list can be told.
+model ColumnLayout {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  columnsJson String
+  isDefault   Boolean  @default(false)
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+}
+
+// A user's own saved columns. It is never edited by an administrator action. baseLayoutId / baseLayoutVersion
+// record which recommendation it was started from (no foreign key: deleting a layout must never erase this row).
+model UserColumnPreference {
+  userId            String   @id
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  columnsJson       String
+  baseLayoutId      String?
+  baseLayoutVersion Int?
+  updatedAt         DateTime @updatedAt
 }

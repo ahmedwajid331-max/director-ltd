@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import type { FilterNode, FilterRule } from "./types";
 import { parseFilterOrThrow } from "./validate";
+import { isNameLetter, nameLetterConditions } from "./nameLetter";
 
 // Compiles a *validated* filter tree (see validate.ts) into a Prisma where
 // clause for PostgreSQL. Never call compileFilterNode with raw user input -
@@ -34,11 +35,53 @@ function str(field: string, operator: "equals" | "contains" | "startsWith", valu
   return { [field]: { [operator]: value, mode: "insensitive" } } as Prisma.CompanyWhereInput;
 }
 
-function compileRule(rule: FilterRule, now: Date): Prisma.CompanyWhereInput | null {
+// directorCount / singleDirector default to 0 / false until officers are
+// fetched, so on their own they cannot tell "no directors" from "not fetched".
+// Director rules therefore only match companies with confirmed (full) officer
+// coverage; none / unavailable companies never qualify, whatever the operator.
+const OFFICER_DERIVED_FIELDS = new Set(["directorCount", "singleDirector"]);
+
+// Two compilations of the same filter tree (three-valued logic: a director
+// rule on a company without confirmed officer data is UNKNOWN, not false):
+//   "confirmed" - the filter evaluates TRUE. These are the results.
+//   "possible"  - the filter does not evaluate FALSE (TRUE or UNKNOWN): a
+//                 director rule also admits every company whose officers are
+//                 not confirmed. possible - confirmed = the companies that
+//                 could not be evaluated yet. confirmed is always a subset of
+//                 possible, so the unknown count is a plain count difference.
+export type CompileMode = "confirmed" | "possible";
+
+// Per-user CRM flags live on UserCompanyState, one row per (user, company). A CRM rule compiles to an indexed
+// relation filter on THAT user's row only, never another user's: "Saved = Yes" is `some state of this user with
+// saved`, "Saved = No" is its negation (a company with no state row is simply not saved). Without a user there is
+// no CRM state, so Yes matches nothing and No matches everything.
+const CRM_FIELDS = new Set(["followed", "saved", "redFlagged"]);
+
+function compileCrmRule(rule: FilterRule, userId: string | undefined): Prisma.CompanyWhereInput | null {
+  if (rule.operator !== "isTrue" && rule.operator !== "isFalse") return null;
+  const wantsTrue = rule.operator === "isTrue";
+  if (!userId) return wantsTrue ? { id: "__no-user__" } : {};
+  const has: Prisma.CompanyWhereInput = { userStates: { some: { userId, [rule.field]: true } } };
+  return wantsTrue ? has : { NOT: has };
+}
+
+function compileRule(rule: FilterRule, now: Date, mode: CompileMode, userId?: string): Prisma.CompanyWhereInput | null {
+  if (CRM_FIELDS.has(rule.field)) return compileCrmRule(rule, userId);
+  const where = compileRuleValue(rule, now);
+  if (!where || !OFFICER_DERIVED_FIELDS.has(rule.field)) return where;
+  const confirmed: Prisma.CompanyWhereInput = { AND: [{ officersCoverage: "full" }, where] };
+  return mode === "confirmed" ? confirmed : { OR: [{ officersCoverage: { not: "full" } }, confirmed] };
+}
+
+function compileRuleValue(rule: FilterRule, now: Date): Prisma.CompanyWhereInput | null {
   const { field, operator, value, value2 } = rule;
   if (operator === "isTrue") return { [field]: true } as Prisma.CompanyWhereInput;
   if (operator === "isFalse") return { [field]: false } as Prisma.CompanyWhereInput;
   if (value === "" || value === null || value === undefined) return null; // inactive rule
+
+  if (field === "nameLetter") {
+    return operator === "equals" && isNameLetter(value) ? { AND: nameLetterConditions(String(value)) } : null;
+  }
 
   if (field === "companyAgeYears") {
     const today = utcToday(now);
@@ -94,11 +137,11 @@ function compileRule(rule: FilterRule, now: Date): Prisma.CompanyWhereInput | nu
   }
 }
 
-export function compileFilterNode(node: FilterNode, now: Date = new Date()): Prisma.CompanyWhereInput | null {
-  if (node.kind === "rule") return compileRule(node, now);
+export function compileFilterNode(node: FilterNode, now: Date = new Date(), mode: CompileMode = "confirmed", userId?: string): Prisma.CompanyWhereInput | null {
+  if (node.kind === "rule") return compileRule(node, now, mode, userId);
 
   const compiledChildren = node.children
-    .map((child) => compileFilterNode(child, now))
+    .map((child) => compileFilterNode(child, now, mode, userId))
     .filter((c): c is Prisma.CompanyWhereInput => c !== null);
 
   if (compiledChildren.length === 0) return null;
@@ -107,8 +150,19 @@ export function compileFilterNode(node: FilterNode, now: Date = new Date()): Pri
 }
 
 // Validates (throws FilterValidationError on bad input) then compiles.
-export function compileFilterToWhere(input: unknown, now: Date = new Date()): Prisma.CompanyWhereInput {
+export function compileFilterToWhere(input: unknown, now: Date = new Date(), mode: CompileMode = "confirmed", userId?: string): Prisma.CompanyWhereInput {
   const node = parseFilterOrThrow(input);
   if (!node) return {};
-  return compileFilterNode(node, now) ?? {};
+  return compileFilterNode(node, now, mode, userId) ?? {};
+}
+
+// True when the filter contains at least one ACTIVE director rule
+// (directorCount / singleDirector with a usable value), i.e. when its results
+// depend on officer coverage and an unknown count is meaningful.
+export function hasActiveDirectorRules(input: unknown, now: Date = new Date()): boolean {
+  const node = parseFilterOrThrow(input);
+  if (!node) return false;
+  const walk = (n: FilterNode): boolean =>
+    n.kind === "rule" ? OFFICER_DERIVED_FIELDS.has(n.field) && compileRuleValue(n, now) !== null : n.children.some(walk);
+  return walk(node);
 }

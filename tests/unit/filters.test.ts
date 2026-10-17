@@ -8,6 +8,9 @@ const rule = (field: string, operator: string, value?: unknown, value2?: unknown
 });
 const group = (combinator: string, ...children: unknown[]) => ({ id: "g", kind: "group", combinator, children });
 
+// Director rules are gated on confirmed officer coverage (see compile.ts).
+const full = (where: unknown) => ({ AND: [{ officersCoverage: "full" }, where] });
+
 function rejects(input: unknown, re?: RegExp) {
   const res = parseFilter(input);
   assert.equal(res.ok, false, `expected rejection of ${JSON.stringify(input)}`);
@@ -16,16 +19,16 @@ function rejects(input: unknown, re?: RegExp) {
 }
 
 test("director count: exactly 1, exactly 2 (numeric equals, the old HTTP 500)", () => {
-  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "equals", 1))), { directorCount: 1 });
-  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "equals", "2"))), { directorCount: 2 }); // UI sends strings
+  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "equals", 1))), full({ directorCount: 1 }));
+  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "equals", "2"))), full({ directorCount: 2 })); // UI sends strings
 });
 
 test("director count comparisons and range", () => {
-  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "gt", 2))), { directorCount: { gt: 2 } });
-  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "gte", 3))), { directorCount: { gte: 3 } });
-  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "lt", 3))), { directorCount: { lt: 3 } });
-  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "lte", 4))), { directorCount: { lte: 4 } });
-  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "between", 5, 2))), { directorCount: { gte: 2, lte: 5 } });
+  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "gt", 2))), full({ directorCount: { gt: 2 } }));
+  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "gte", 3))), full({ directorCount: { gte: 3 } }));
+  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "lt", 3))), full({ directorCount: { lt: 3 } }));
+  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "lte", 4))), full({ directorCount: { lte: 4 } }));
+  assert.deepEqual(compileFilterToWhere(group("AND", rule("directorCount", "between", 5, 2))), full({ directorCount: { gte: 2, lte: 5 } }));
 });
 
 test("rejects unknown fields and internal fields (id, source, relations, secrets)", () => {
@@ -86,7 +89,7 @@ test("null / undefined filter means no filter; blank rules are inactive, not err
 test("boolean rules: DS01, dormant, single director, late filing", () => {
   assert.deepEqual(compileFilterToWhere(group("AND", rule("hasDS01", "isTrue"))), { hasDS01: true });
   assert.deepEqual(compileFilterToWhere(group("AND", rule("dormant", "isFalse"))), { dormant: false });
-  assert.deepEqual(compileFilterToWhere(group("AND", rule("singleDirector", "isTrue"))), { singleDirector: true });
+  assert.deepEqual(compileFilterToWhere(group("AND", rule("singleDirector", "isTrue"))), full({ singleDirector: true }));
   assert.deepEqual(compileFilterToWhere(group("AND", rule("accountsOverdue", "isTrue"))), { accountsOverdue: true });
 });
 
@@ -125,4 +128,65 @@ test("age boundaries use the calendar date, not the time of day", () => {
 test("leap day minus N years clamps to 28 Feb", () => {
   assert.equal(yearsBefore(new Date("2024-02-29T00:00:00Z"), 1).toISOString(), "2023-02-28T00:00:00.000Z");
   assert.equal(yearsBefore(new Date("2024-02-29T00:00:00Z"), 4).toISOString(), "2020-02-29T00:00:00.000Z");
+});
+
+test("director filters only match confirmed (full) officer coverage, for every operator", () => {
+  const cases: unknown[][] = [
+    ["directorCount", "equals", 0],
+    ["directorCount", "lt", 2],
+    ["directorCount", "lte", 1],
+    ["directorCount", "between", 0, 3],
+    ["singleDirector", "isFalse"],
+    ["singleDirector", "isTrue"],
+  ];
+  for (const [field, op, v, v2] of cases) {
+    const where = compileFilterToWhere(group("AND", rule(field as string, op as string, v, v2))) as { AND?: unknown[] };
+    assert.deepEqual(where.AND?.[0], { officersCoverage: "full" }, `${field} ${op}`);
+  }
+  // non-director rules are not gated
+  assert.deepEqual(compileFilterToWhere(group("AND", rule("dormant", "isFalse"))), { dormant: false });
+  // gate survives OR
+  const or = compileFilterToWhere(group("OR", rule("directorCount", "equals", 0), rule("hasDS01", "isTrue"))) as { OR: unknown[] };
+  assert.deepEqual(or.OR[0], full({ directorCount: 0 }));
+});
+
+// ---- three-valued director filters: confirmed vs possible ----------------------------------------------------
+import { hasActiveDirectorRules } from "../../src/lib/filters/compile";
+
+test("possible mode: a director rule also admits every company whose officers are not confirmed", () => {
+  const f = group("AND", rule("directorCount", "equals", 1));
+  assert.deepEqual(compileFilterToWhere(f, new Date(), "confirmed"), full({ directorCount: 1 }));
+  assert.deepEqual(compileFilterToWhere(f, new Date(), "possible"), { OR: [{ officersCoverage: { not: "full" } }, full({ directorCount: 1 })] });
+  // single director, yes and no
+  assert.deepEqual(compileFilterToWhere(group("AND", rule("singleDirector", "isFalse")), new Date(), "possible"), { OR: [{ officersCoverage: { not: "full" } }, full({ singleDirector: false })] });
+});
+
+test("possible mode leaves non-director rules untouched, so possible - confirmed is exactly the unevaluable set", () => {
+  const f = group("AND", rule("hasDS01", "isTrue"), rule("directorCount", "gt", 2), rule("dormant", "isFalse"));
+  const possible = compileFilterToWhere(f, new Date(), "possible") as { AND: unknown[] };
+  assert.deepEqual(possible.AND[0], { hasDS01: true });
+  assert.deepEqual(possible.AND[1], { OR: [{ officersCoverage: { not: "full" } }, full({ directorCount: { gt: 2 } })] });
+  assert.deepEqual(possible.AND[2], { dormant: false });
+});
+
+test("possible mode through nested AND / OR groups: each director rule is relaxed, the structure is preserved", () => {
+  const f = group("OR", group("AND", rule("status", "equals", "active"), rule("directorCount", "equals", 0)), group("AND", rule("hasDS01", "isTrue"), rule("singleDirector", "isTrue")));
+  const where = compileFilterToWhere(f, new Date(), "possible") as { OR: { AND: unknown[] }[] };
+  assert.equal(where.OR.length, 2);
+  assert.deepEqual(where.OR[0].AND[0], { status: "active" });
+  assert.deepEqual(where.OR[0].AND[1], { OR: [{ officersCoverage: { not: "full" } }, full({ directorCount: 0 })] });
+  assert.deepEqual(where.OR[1].AND[0], { hasDS01: true });
+  assert.deepEqual(where.OR[1].AND[1], { OR: [{ officersCoverage: { not: "full" } }, full({ singleDirector: true })] });
+  // the confirmed compilation of the same tree has no relaxation
+  const confirmed = compileFilterToWhere(f) as { OR: { AND: unknown[] }[] };
+  assert.deepEqual(confirmed.OR[0].AND[1], full({ directorCount: 0 }));
+});
+
+test("hasActiveDirectorRules: only an ACTIVE director rule makes an unknown count meaningful", () => {
+  assert.equal(hasActiveDirectorRules(group("AND", rule("directorCount", "equals", 1))), true);
+  assert.equal(hasActiveDirectorRules(group("AND", rule("singleDirector", "isTrue"))), true);
+  assert.equal(hasActiveDirectorRules(group("AND", group("OR", rule("name", "contains", "x"), rule("directorCount", "lt", 3)))), true);
+  assert.equal(hasActiveDirectorRules(group("AND", rule("directorCount", "equals", ""))), false, "an empty rule is inactive");
+  assert.equal(hasActiveDirectorRules(group("AND", rule("hasDS01", "isTrue"))), false);
+  assert.equal(hasActiveDirectorRules(null), false);
 });

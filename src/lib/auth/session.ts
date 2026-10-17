@@ -2,9 +2,10 @@ import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
 import type { UserRole } from "@/lib/types";
+import { resolvePermissions, type PermissionKey } from "@/lib/auth/permissions";
+import { SESSION_MAX_AGE_SECONDS, SESSION_TOUCH_INTERVAL_MS } from "@/lib/staff/sessions";
 
 const SESSION_COOKIE = "director_session";
-const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7; // upper bound; the DB check below can end a session at any time
 
 const WEAK_SECRET_PATTERN = /^(dev|replace|change|secret|test|password)/i;
 
@@ -29,9 +30,13 @@ export interface SessionPayload {
   email: string;
   name: string;
   role: UserRole;
+  // The UserSession row this cookie belongs to (absent on cookies issued before session tracking existed).
+  sid?: string;
+  // Resolved from the database on every request (never trusted from the cookie): see getSession().
+  permissions: PermissionKey[];
 }
 
-export async function createSessionToken(payload: SessionPayload): Promise<string> {
+export async function createSessionToken(payload: Omit<SessionPayload, "permissions">): Promise<string> {
   return new SignJWT({ ...payload })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
@@ -71,20 +76,35 @@ export async function clearSessionCookie() {
 // they may do now. A deactivated or deleted user is rejected immediately,
 // and the role always comes from the database, so a demotion or promotion
 // takes effect on the very next request.
-export async function getSession(): Promise<SessionPayload | null> {
+export async function getSession(opts: { touch?: boolean } = {}): Promise<SessionPayload | null> {
   const store = await cookies();
   const token = store.get(SESSION_COOKIE)?.value;
   if (!token) return null;
   const claims = await verifySessionToken(token);
   if (!claims?.userId) return null;
 
-  const user = await db.user.findUnique({
-    where: { id: claims.userId },
-    select: { id: true, email: true, name: true, role: true, active: true },
+  const userSelect = { id: true, email: true, name: true, role: true, active: true, permissions: true } as const;
+  const to = (u: { id: string; email: string; name: string; role: string; permissions: string | null }, sid?: string): SessionPayload => ({
+    userId: u.id,
+    email: u.email,
+    name: u.name,
+    role: u.role as UserRole,
+    permissions: resolvePermissions(u.role as UserRole, u.permissions),
+    ...(sid ? { sid } : {}),
   });
-  if (!user || !user.active) return null;
 
-  return { userId: user.id, email: user.email, name: user.name, role: user.role as UserRole };
+  // Every valid sign-in has a tracked session (see the proxy: cookies without one are refused). An explicit logout, an
+  // administrator ending it, or deactivation invalidates the cookie server-side too.
+  if (!claims.sid) return null;
+  const row = await db.userSession.findUnique({ where: { id: claims.sid }, include: { user: { select: userSelect } } });
+  if (!row || row.userId !== claims.userId || row.endedAt || !row.user.active) return null;
+  const now = Date.now();
+  if (opts.touch !== false && now - row.lastActivityAt.getTime() > SESSION_TOUCH_INTERVAL_MS) {
+    // `touch: false` is used by sign-out so the logout request itself is not recorded as the last time the person was seen.
+    // Throttled to one write a minute per session; a failed touch must never fail the request.
+    await db.userSession.update({ where: { id: row.id }, data: { lastActivityAt: new Date(now) } }).catch(() => undefined);
+  }
+  return to(row.user, row.id);
 }
 
 export const SESSION_COOKIE_NAME = SESSION_COOKIE;

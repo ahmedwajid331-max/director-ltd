@@ -38,7 +38,7 @@ export function FilterRuleRow({
       <Select
         value={rule.field}
         onChange={(e) => handleFieldChange(e.target.value)}
-        className="w-auto min-w-[160px] flex-none"
+        className="w-auto! min-w-[160px] flex-none"
       >
         {Object.entries(
           COMPANY_FILTER_FIELDS.reduce<Record<string, typeof COMPANY_FILTER_FIELDS>>((groups, f) => {
@@ -60,7 +60,7 @@ export function FilterRuleRow({
         <Select
           value={rule.operator}
           onChange={(e) => handleOperatorChange(e.target.value as Operator)}
-          className="w-auto min-w-[130px] flex-none"
+          className="w-auto! min-w-[130px] flex-none"
         >
           {field.operators.map((op) => (
             <option key={op} value={op}>
@@ -74,7 +74,7 @@ export function FilterRuleRow({
         <Select
           value={rule.operator}
           onChange={(e) => handleOperatorChange(e.target.value as Operator)}
-          className="w-auto min-w-[90px] flex-none"
+          className="w-auto! min-w-[90px] flex-none"
         >
           <option value="isTrue">Yes</option>
           <option value="isFalse">No</option>
@@ -83,7 +83,7 @@ export function FilterRuleRow({
         <Select
           value={String(rule.value ?? "")}
           onChange={(e) => onChange({ ...rule, value: e.target.value })}
-          className="w-auto min-w-[160px] flex-1"
+          className="w-auto! min-w-[160px] flex-1"
         >
           <option value="" disabled>
             Select…
@@ -100,7 +100,7 @@ export function FilterRuleRow({
             type="date"
             value={String(rule.value ?? "")}
             onChange={(e) => onChange({ ...rule, value: e.target.value })}
-            className="min-w-[150px] flex-1"
+            className="w-auto! min-w-[150px] flex-1"
           />
           {needsValue2 && (
             <>
@@ -109,7 +109,7 @@ export function FilterRuleRow({
                 type="date"
                 value={String(rule.value2 ?? "")}
                 onChange={(e) => onChange({ ...rule, value2: e.target.value })}
-                className="min-w-[150px] flex-1"
+                className="w-auto! min-w-[150px] flex-1"
               />
             </>
           )}
@@ -121,7 +121,7 @@ export function FilterRuleRow({
             value={String(rule.value ?? "")}
             placeholder={field.placeholder}
             onChange={(e) => onChange({ ...rule, value: e.target.value })}
-            className="min-w-[140px] flex-1"
+            className="w-auto! min-w-[140px] flex-1"
           />
           {needsValue2 && (
             <>
@@ -130,11 +130,17 @@ export function FilterRuleRow({
                 type="number"
                 value={String(rule.value2 ?? "")}
                 onChange={(e) => onChange({ ...rule, value2: e.target.value })}
-                className="min-w-[100px] flex-1"
+                className="w-auto! min-w-[100px] flex-1"
               />
             </>
           )}
         </div>
+      )}
+
+      {field.group === "Directors" && (
+        <p className="basis-full text-xs text-slate-500">
+          Director filters only evaluate companies with confirmed officer data. &quot;Not fetched&quot; and &quot;Unavailable&quot; companies are never treated as zero directors; the result shows how many could not be evaluated.
+        </p>
       )}
 
       <button

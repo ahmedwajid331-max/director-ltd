@@ -53,3 +53,7 @@ next-env.d.ts
 .env.pre-fix.bak.local
 /.pgdata-test/
 /.pgdata/
+tests/.browser-output/
+
+# user-uploaded profile pictures (src/lib/avatar.ts)
+/data/

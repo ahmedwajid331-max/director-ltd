@@ -35,7 +35,7 @@ test("invalid filters return a controlled 400, never a 500", async () => {
 test("director count: exactly 1, exactly 2, >, >=, <, <=, between match the database", async () => {
   const s = await sessionFor("USER");
   const tag = `DC${Date.now() % 1000000}`;
-  const make = (n: number) => makeCompany({ name: `${tag} ${n}`, directorCount: n, singleDirector: n === 1 });
+  const make = (n: number) => makeCompany({ name: `${tag} ${n}`, directorCount: n, singleDirector: n === 1, officersCoverage: "full" });
   for (const n of [0, 1, 1, 2, 3, 3, 3, 5]) await make(n);
   const f = (r: unknown) => group("AND", rule("name", "startsWith", tag), r);
   const count = async (r: unknown) => (await search(s, { filter: f(r), pageSize: 1 })).json.total as number;
@@ -48,6 +48,34 @@ test("director count: exactly 1, exactly 2, >, >=, <, <=, between match the data
   assert.equal(await count(rule("directorCount", "lte", 1)), 3);
   assert.equal(await count(rule("directorCount", "between", 2, 3)), 4);
   assert.equal(await count(rule("singleDirector", "isTrue")), 2);
+});
+
+test("director filters and CSV export never treat unfetched officer data as zero / not-single", async () => {
+  const s = await sessionFor("USER");
+  const tag = `NF${Date.now() % 1000000}`;
+  const mk = (label: string, over: Record<string, unknown>) => makeCompany({ name: `${tag} ${label}`, ...over });
+  await mk("unfetched", { officersCoverage: "none", directorCount: 0, singleDirector: false });
+  await mk("partial", { officersCoverage: "partial", directorCount: 0, singleDirector: false });
+  await mk("zero", { officersCoverage: "full", directorCount: 0, singleDirector: false });
+  await mk("one", { officersCoverage: "full", directorCount: 1, singleDirector: true });
+  await mk("three", { officersCoverage: "full", directorCount: 3, singleDirector: false });
+  const names = async (r: unknown) =>
+    ((await search(s, { filter: group("AND", rule("name", "startsWith", tag), r) })).json.rows as { name: string }[]).map((x) => x.name.slice(tag.length + 1)).sort();
+  assert.deepEqual(await names(rule("directorCount", "equals", 0)), ["zero"]);
+  assert.deepEqual(await names(rule("directorCount", "lt", 2)), ["one", "zero"]);
+  assert.deepEqual(await names(rule("directorCount", "lte", 1)), ["one", "zero"]);
+  assert.deepEqual(await names(rule("directorCount", "equals", 1)), ["one"]);
+  assert.deepEqual(await names(rule("directorCount", "equals", 3)), ["three"]);
+  assert.deepEqual(await names(rule("singleDirector", "isTrue")), ["one"]);
+  assert.deepEqual(await names(rule("singleDirector", "isFalse")), ["three", "zero"]);
+
+  const exp = await api(s, "/api/companies/export", { body: { filter: group("AND", rule("name", "startsWith", tag)) } });
+  assert.equal(exp.status, 200);
+  const line = (label: string) => exp.text.split(/\r?\n/).find((l) => l.includes(`${tag} ${label}`)) ?? "";
+  for (const l of ["unfetched", "partial"]) assert.match(line(l), /Not fetched,Not fetched/, l);
+  assert.match(line("zero"), /,0,No,/);
+  assert.match(line("one"), /,1,Yes,/);
+  assert.match(line("three"), /,3,No,/);
 });
 
 test("company age uses calendar dates at the boundary", async () => {
@@ -123,6 +151,39 @@ test("follow and trash are mutually exclusive, and restore leaves the company un
   await api(s, `/api/companies/${c.id}/state`, { body: { trashed: false } }); // restore
   assert.deepEqual([(await state()).followed, (await state()).trashed], [false, false]);
   assert.equal((await api(s, `/api/companies/${c.id}/state`, { body: {} })).status, 400);
+});
+
+test("saved and red flag are independent of follow/trash, per user, and set in bulk", async () => {
+  const a = await sessionFor("USER");
+  const b = await sessionFor("USER");
+  const [c1, c2] = [await makeCompany(), await makeCompany()];
+  const stateOf = async (userId: string, companyId: string) =>
+    (await db.userCompanyState.findUnique({ where: { userId_companyId: { userId, companyId } } }))!;
+
+  const r = await api(a, "/api/companies/bulk-state", { body: { ids: [c1.id, c2.id, "does-not-exist"], patch: { saved: true, redFlagged: true } } });
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.json.updated, r.json.skipped], [2, 1]);
+
+  await api(a, "/api/companies/bulk-state", { body: { ids: [c1.id], patch: { followed: true } } });
+  await api(a, "/api/companies/bulk-state", { body: { ids: [c1.id], patch: { trashed: true } } });
+  const s1 = await stateOf(a.userId, c1.id);
+  assert.deepEqual([s1.saved, s1.redFlagged, s1.followed, s1.trashed], [true, true, false, true]); // trash keeps Saved + Red Flag
+
+  const found = await search(a, { scope: "trashed", filter: group("AND", rule("companyNumber", "equals", c1.companyNumber)) });
+  assert.deepEqual([found.json.rows[0].saved, found.json.rows[0].redFlagged], [true, true]);
+
+  // Another user's state is untouched and invisible.
+  assert.equal(await db.userCompanyState.count({ where: { userId: b.userId, companyId: { in: [c1.id, c2.id] } } }), 0);
+  const other = await search(b, { filter: group("AND", rule("companyNumber", "equals", c2.companyNumber)) });
+  assert.deepEqual([other.json.rows[0].saved, other.json.rows[0].redFlagged], [false, false]);
+
+  // Validation: auth, empty / oversized id lists, unknown fields, all-unknown ids.
+  assert.equal((await api(a, "/api/companies/bulk-state", { body: { ids: [], patch: { saved: true } } })).status, 400);
+  assert.equal((await api(a, "/api/companies/bulk-state", { body: { ids: Array(101).fill("x"), patch: { saved: true } } })).status, 400);
+  assert.equal((await api(a, "/api/companies/bulk-state", { body: { ids: [c1.id], patch: { userId: "x" } } })).status, 400);
+  assert.equal((await api(a, "/api/companies/bulk-state", { body: { ids: ["nope"], patch: { saved: true } } })).status, 404);
+  const anon = await fetch(`${BASE}/api/companies/bulk-state`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [c1.id], patch: { saved: true } }) });
+  assert.equal(anon.status, 401);
 });
 
 test("trash is per user: another user still sees the company", async () => {
@@ -206,7 +267,8 @@ test("the dashboard and landing page report real coverage, not total rows", asyn
   const prod = await sessionFor("USER", "cov", BASE_PROD);
   await makeCompany({ source: "seed" });
   const dash = await (await fetch(`${BASE_PROD}/dashboard`, { headers: { cookie: `director_session=${prod.cookie}` } })).text();
-  assert.match(dash, /Companies House coverage/);
+  assert.match(dash, /Companies House register/);
+  assert.match(dash, /companies loaded/);
   assert.doesNotMatch(dash, /live data connected/);
   const home = await (await fetch(`${BASE_PROD}/`)).text();
   assert.doesNotMatch(home, /Every active and dissolved UK company/);

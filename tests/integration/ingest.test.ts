@@ -96,7 +96,8 @@ test("re-running the same input creates zero duplicates (idempotent)", async () 
   const res = await bulkIngestFromCsv({ input: FIXTURE_ZIP, batchSize: 25 });
   assert.equal(res.status, "success");
   assert.equal(res.rowsInserted, 0);
-  assert.equal(res.rowsUpdated, 59);
+  assert.equal(res.rowsUpdated, 0); // identical data is no longer rewritten...
+  assert.equal(res.rowsUnchanged, 59); // ...it is counted as unchanged
   assert.equal(await db.company.count(), before);
   const dupes = await db.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM (SELECT "companyNumber" FROM "Company" GROUP BY 1 HAVING count(*) > 1) d`;
   assert.equal(Number(dupes[0].n), 0);

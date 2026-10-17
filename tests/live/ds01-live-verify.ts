@@ -3,6 +3,7 @@
 //   1. npm run ch:stream -- --max-seconds 900     (captures live events)
 //   2. npm run build && npx next start -p 3100    (in another terminal)
 //   3. DEV_LOGIN_EMAIL=... DEV_LOGIN_PASSWORD=... npx tsx tests/live/ds01-live-verify.ts
+import "../support/require-scratch-db"; // must stay first: only run against a scratch/test database
 import { db } from "../../src/lib/db";
 
 const BASE = process.env.VERIFY_BASE ?? "http://127.0.0.1:3100";
